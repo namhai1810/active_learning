@@ -1,0 +1,22 @@
+# Fast end-to-end sanity check. This is not a benchmark result.
+run_name: hans_qwen3_1_7b_smoke
+seed: 42
+output_dir: outputs
+overwrite: true
+
+dataset:
+  name: hans
+  data_file: https://raw.githubusercontent.com/tommccoy1/hans/7299f6f657089ce06a0f98e7e81f8d0f5b7741ce/heuristics_evaluation_set.txt
+  split: validation
+  cache_dir: null
+  max_examples: 2
+
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  adapter_path: null
+  device_map: auto
+  dtype: bfloat16
+  trust_remote_code: false
+  local_files_only: false
+  max_length: 512
+  batch_size: 2
