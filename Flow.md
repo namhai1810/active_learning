@@ -822,8 +822,8 @@ generation/QC, verification, pilots, LoRA training và evaluation. Ledger tách:
 
 Teacher tokens và pilot GPU time được đo khi provider/runtime cung cấp; full-run
 GPU time và USD rates là configured assumptions/projections. Shared calls được
-phân bổ một lần. Synthetic examples mặc định có zero human-annotation items;
-human cost chỉ khác zero khi có human work thực sự được log/cấu hình.
+phân bổ một lần. Pipeline được tự động hóa hoàn toàn; cost schema chỉ chứa LLM
+inference, generation/QC, verification, pilot/full LoRA training và evaluation.
 
 ### 11.3 Eligibility
 

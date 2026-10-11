@@ -80,8 +80,6 @@ def test_optimistic_net_value_equation():
 
 def test_full_cost_model_accounts_for_every_configurable_component():
     usage = CostUsage(
-        human_annotation_items=2,
-        human_review_items=3,
         llm_input_tokens=1000,
         llm_output_tokens=2000,
         generated_items=4,
@@ -93,8 +91,6 @@ def test_full_cost_model_accounts_for_every_configurable_component():
         evaluation_gpu_seconds=1800,
     )
     rates = CostRates(
-        human_annotation_per_item=1,
-        human_review_per_item=2,
         llm_input_per_1k_tokens=3,
         llm_output_per_1k_tokens=4,
         data_generation_per_item=5,
@@ -108,8 +104,6 @@ def test_full_cost_model_accounts_for_every_configurable_component():
     result = compute_cost(usage, rates, currency="USD")
     assert result.components == pytest.approx(
         {
-            "human_annotation": 2,
-            "human_review": 6,
             "llm_inference_input": 3,
             "llm_inference_output": 8,
             "data_generation": 20,
@@ -118,15 +112,29 @@ def test_full_cost_model_accounts_for_every_configurable_component():
             "evaluation": 124,
         }
     )
-    assert result.total == pytest.approx(208)
+    assert result.total == pytest.approx(200)
 
 
 def test_composite_total_is_the_cost_used_in_utility():
     total = compute_cost(
-        CostUsage(human_review_items=10),
-        CostRates(human_review_per_item=0.2),
+        CostUsage(llm_input_tokens=1000),
+        CostRates(llm_input_per_1k_tokens=2.0),
     ).total
     assert compute_optimistic_net_value(0.4, 0.1, total, 0.25) == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ("factory", "value"),
+    [
+        (CostRates.from_mapping, {"human_annotation_per_item": 1.0}),
+        (CostRates.from_mapping, {"human_review_per_item": 1.0}),
+        (CostUsage.from_mapping, {"human_annotation_items": 1.0}),
+        (CostUsage.from_mapping, {"human_review_items": 1.0}),
+    ],
+)
+def test_cost_model_rejects_removed_human_cost_fields(factory, value):
+    with pytest.raises(ValueError, match="Unknown cost"):
+        factory(value)
 
 
 def test_cost_model_rejects_negative_resource_usage():

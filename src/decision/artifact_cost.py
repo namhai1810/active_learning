@@ -10,6 +10,14 @@ from typing import Any
 from src.decision.cost_model import CostUsage, compute_cost, cost_rates_from_config
 
 
+_PROJECTION_FIELDS = {
+    "lora_training_gpu_seconds_fixed",
+    "lora_training_gpu_seconds_per_item",
+    "evaluation_gpu_seconds_fixed",
+    "evaluation_gpu_seconds_per_item",
+}
+
+
 def _jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
@@ -33,6 +41,16 @@ def _number(mapping: Mapping[str, Any], key: str, default: float = 0.0) -> float
     if result < 0:
         raise ValueError(f"cost.projections.{key} must be non-negative")
     return result
+
+
+def _projections(cost_config: Mapping[str, Any]) -> Mapping[str, Any]:
+    raw = cost_config.get("projections", {})
+    if not isinstance(raw, Mapping):
+        raise ValueError("cost.projections must be a mapping")
+    unknown = sorted(set(raw) - _PROJECTION_FIELDS)
+    if unknown:
+        raise ValueError(f"Unknown cost projection fields: {unknown}")
+    return raw
 
 
 def _contains_id(value: Any, hypothesis_id: str) -> bool:
@@ -75,9 +93,7 @@ def build_round_incurred_cost(
     """Account once for every exploration resource, including STOP/no-candidate rounds."""
     root = Path(run_dir)
     rates, currency = cost_rates_from_config(cost_config)
-    projections_raw = cost_config.get("projections", {})
-    if not isinstance(projections_raw, Mapping):
-        raise ValueError("cost.projections must be a mapping")
+    _projections(cost_config)
     input_tokens = 0.0
     output_tokens = 0.0
     for path in sorted((root / "teacher_calls").glob("*.jsonl")):
@@ -97,8 +113,6 @@ def build_round_incurred_cost(
         if isinstance(row.get("eval_ids"), list)
     )
     usage = CostUsage(
-        human_review_items=(generated + len(probes))
-        * _number(projections_raw, "human_review_items_per_verified_item", 0.0),
         llm_input_tokens=input_tokens,
         llm_output_tokens=output_tokens,
         generated_items=generated,
@@ -145,9 +159,7 @@ def build_artifact_costs(
     if len(ids) != len(set(ids)):
         raise ValueError("hypothesis_ids must be unique")
     rates, currency = cost_rates_from_config(cost_config)
-    projections_raw = cost_config.get("projections", {})
-    if not isinstance(projections_raw, Mapping):
-        raise ValueError("cost.projections must be a mapping")
+    projections_raw = _projections(cost_config)
     tokens = _allocated_teacher_usage(root, ids)
     generated_rows = _jsonl(root / "synthetic" / "generated.jsonl")
     verification_rows = _jsonl(root / "verification" / "generated_probes.jsonl")
@@ -199,11 +211,6 @@ def build_artifact_costs(
             else 0.0
         )
         incurred_usage = CostUsage(
-            # Synthetic labels are teacher-generated and QC'd. Human annotation
-            # is zero unless a run explicitly logs it elsewhere.
-            human_annotation_items=0.0,
-            human_review_items=(generated_count + probe_count)
-            * _number(projections_raw, "human_review_items_per_verified_item", 0.0),
             llm_input_tokens=input_tokens,
             llm_output_tokens=output_tokens,
             generated_items=generated_count,
@@ -222,12 +229,6 @@ def build_artifact_costs(
             ),
         )
         projected_usage = CostUsage(
-            human_annotation_items=full_count
-            * _number(
-                projections_raw,
-                "human_annotation_items_per_training_item",
-                0.0,
-            ),
             lora_training_runs=1 if full_count else 0,
             lora_training_gpu_seconds=projected_train_gpu,
             evaluation_runs=2 if eval_count else 0,

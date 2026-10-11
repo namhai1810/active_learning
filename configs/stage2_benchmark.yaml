@@ -56,8 +56,6 @@ cost:
   type: full_pipeline
   currency: USD
   rates:
-    human_annotation_per_item: 0.0
-    human_review_per_item: 0.0
     llm_input_per_1k_tokens: 0.0002
     llm_output_per_1k_tokens: 0.0006
     data_generation_per_item: 0.001

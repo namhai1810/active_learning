@@ -463,8 +463,6 @@ def main() -> None:
         provenance.get("resource_usage", {}) if provenance is not None else {}
     )
     measured_usage = CostUsage(
-        human_annotation_items=0.0,
-        human_review_items=0.0,
         llm_input_tokens=float(synthetic_resources.get("teacher_input_tokens", 0)),
         llm_output_tokens=float(synthetic_resources.get("teacher_output_tokens", 0)),
         generated_items=float(synthetic_resources.get("generated_examples", 0)),

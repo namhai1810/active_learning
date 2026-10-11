@@ -110,7 +110,7 @@ def test_hans_subcase_metrics_are_consistent_with_overall_counts():
     assert sum(metrics["subcase_counts"].values()) == metrics["num_examples"]
 
 
-def test_stop_cost_ledger_keeps_incurred_cost_and_no_synthetic_human_annotation(tmp_path):
+def test_stop_cost_ledger_keeps_automated_incurred_cost(tmp_path):
     (tmp_path / "teacher_calls").mkdir()
     (tmp_path / "synthetic").mkdir()
     (tmp_path / "verification").mkdir()
@@ -140,16 +140,20 @@ def test_stop_cost_ledger_keeps_incurred_cost_and_no_synthetic_human_annotation(
                 "data_generation_per_item": 3,
                 "lora_training_per_run": 5,
             },
-            "projections": {
-                "human_annotation_items_per_training_item": 0,
-                "human_review_items_per_verified_item": 0,
-            },
+            "projections": {},
         },
     )
     phases = breakdowns["h1"]["phases"]
     assert phases["incurred_exploration"]["total"] == pytest.approx(5.0)
     assert phases["projected_intervention"]["total"] == pytest.approx(5.0)
-    assert breakdowns["h1"]["usage"]["human_annotation_items"] == 0
+    assert set(breakdowns["h1"]["components"]) == {
+        "llm_inference_input",
+        "llm_inference_output",
+        "data_generation",
+        "data_verification",
+        "lora_training",
+        "evaluation",
+    }
     assert costs["h1"] == pytest.approx(10.0)
     round_cost = build_round_incurred_cost(
         run_dir=tmp_path,
@@ -167,6 +171,18 @@ def test_stop_cost_ledger_keeps_incurred_cost_and_no_synthetic_human_annotation(
     )
     # This remains chargeable even if discovery yields no decision candidate.
     assert round_cost["total"] == pytest.approx(5.0)
+
+    with pytest.raises(ValueError, match="Unknown cost projection fields"):
+        build_round_incurred_cost(
+            run_dir=tmp_path,
+            pilot_observations=[],
+            cost_config={
+                "type": "full_pipeline",
+                "currency": "USD",
+                "rates": {},
+                "projections": {"human_review_items_per_verified_item": 1},
+            },
+        )
 
 
 def test_budget_admission_uses_projected_marginal_not_total_cost():

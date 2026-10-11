@@ -181,11 +181,13 @@ adapter only to the next round.
 The primary method uses `cost.type: full_pipeline`. `C(h)` is a scalar in the
 configured currency with a saved component ledger covering:
 
-- human annotation and review items;
 - measured teacher-LLM input and output tokens;
-- generated and verified data items;
+- automated verification and synthetic generation/QC items;
 - measured pilot plus projected full LoRA runs/GPU time; and
 - pilot/full evaluation runs, items, and projected GPU time.
+
+The proposed pipeline is fully automated. Its cost schema contains no manual
+annotation or review fields, rates, projections, or usage quantities.
 
 Rates live under `cost.rates`; pre-decision projections for resources not yet
 committed live under `cost.projections`. Candidate artifacts store quantities,

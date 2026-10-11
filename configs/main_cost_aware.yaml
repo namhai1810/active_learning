@@ -8,8 +8,6 @@ cost:
   type: full_pipeline
   currency: USD
   rates:
-    human_annotation_per_item: 0.01
-    human_review_per_item: 0.002
     llm_input_per_1k_tokens: 0.0002
     llm_output_per_1k_tokens: 0.0006
     data_generation_per_item: 0.001
@@ -22,10 +20,6 @@ cost:
   # Full-training/evaluation resources are projected before selection. Measured
   # pilot and teacher usage is read from the round artifacts.
   projections:
-    # Synthetic data is not human-annotated in this implementation.
-    human_annotation_items_per_training_item: 0.0
-    # QC/review is performed by the configured teacher, not a human.
-    human_review_items_per_verified_item: 0.0
     lora_training_gpu_seconds_fixed: 0.0
     lora_training_gpu_seconds_per_item: 0.2
     evaluation_gpu_seconds_fixed: 0.0

@@ -2,7 +2,8 @@
 
 The decision rule consumes one scalar cost, but retaining the component ledger is
 essential: it makes units explicit and prevents a synthetic-example count from
-silently standing in for annotation, inference, training, and evaluation costs.
+silently standing in for inference, generation, verification, training, and
+evaluation costs.
 """
 
 from __future__ import annotations
@@ -13,8 +14,6 @@ from typing import Any, Mapping
 
 
 _RATE_FIELDS = (
-    "human_annotation_per_item",
-    "human_review_per_item",
     "llm_input_per_1k_tokens",
     "llm_output_per_1k_tokens",
     "data_generation_per_item",
@@ -40,8 +39,6 @@ def _nonnegative(value: Any, name: str) -> float:
 class CostRates:
     """Prices in one configured currency/unit for every supported resource."""
 
-    human_annotation_per_item: float = 0.0
-    human_review_per_item: float = 0.0
     llm_input_per_1k_tokens: float = 0.0
     llm_output_per_1k_tokens: float = 0.0
     data_generation_per_item: float = 0.0
@@ -69,8 +66,6 @@ class CostRates:
 class CostUsage:
     """Resource quantities attributable to one candidate intervention."""
 
-    human_annotation_items: float = 0.0
-    human_review_items: float = 0.0
     llm_input_tokens: float = 0.0
     llm_output_tokens: float = 0.0
     generated_items: float = 0.0
@@ -133,10 +128,6 @@ def compute_cost(
     checked_usage = CostUsage.from_mapping(asdict(usage))
     checked_rates = CostRates.from_mapping(asdict(rates))
     components = {
-        "human_annotation": checked_usage.human_annotation_items
-        * checked_rates.human_annotation_per_item,
-        "human_review": checked_usage.human_review_items
-        * checked_rates.human_review_per_item,
         "llm_inference_input": checked_usage.llm_input_tokens
         / 1000.0
         * checked_rates.llm_input_per_1k_tokens,

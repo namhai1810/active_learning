@@ -466,12 +466,7 @@ def main() -> None:
     )
     if cost_type == "full_pipeline":
         rates, currency = cost_rates_from_config(cost_config)
-        projections = cost_config.get("projections", {})
-        if not isinstance(projections, dict):
-            raise ValueError("cost.projections must be a mapping")
         realized_usage = CostUsage(
-            human_annotation_items=len(selected_train)
-            * float(projections.get("human_annotation_items_per_training_item", 0.0)),
             lora_training_runs=1,
             lora_training_gpu_seconds=measured_training_gpu_seconds,
             evaluation_runs=2,
