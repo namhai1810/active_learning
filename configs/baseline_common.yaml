@@ -25,12 +25,16 @@ model:
   trust_remote_code: false
   local_files_only: false
   max_length: 512
-  batch_size: 4
+  # Each example expands to three label candidates, so this is an effective
+  # forward microbatch of up to 48 sequences. Sized for ~25 GiB free VRAM.
+  batch_size: 16
 
 training:
   num_epochs: 1
-  batch_size: 32
-  gradient_accumulation_steps: 1
+  # Memory-safe LoRA microbatch. Eight equal microbatches preserve the original
+  # effective batch size of 32 while avoiding the full-logit backward OOM.
+  batch_size: 4
+  gradient_accumulation_steps: 8
   learning_rate: 0.00001
   weight_decay: 0.0
   max_grad_norm: 1.0
@@ -46,4 +50,4 @@ training:
     - gate_proj
     - up_proj
     - down_proj
-  gradient_checkpointing: false
+  gradient_checkpointing: true

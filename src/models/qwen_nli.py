@@ -34,6 +34,7 @@ class QwenNLIStudent:
             raise ValueError("max_length must be at least 32")
         self._torch = torch
         self.max_length = max_length
+        self.progress_label = "NLI inference"
         self.tokenizer = AutoTokenizer.from_pretrained(
             name_or_path,
             trust_remote_code=trust_remote_code,
@@ -216,8 +217,27 @@ class QwenNLIStudent:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
 
+        from tqdm.auto import tqdm
+
+        num_examples = len(premises)
+        num_batches = (num_examples + batch_size - 1) // batch_size
+        label = getattr(self, "progress_label", "NLI inference")
+        print(
+            f"[PROGRESS] {label}: {num_examples:,} examples, "
+            f"{num_examples * len(MNLI_LABELS):,} candidate sequences, "
+            f"{num_batches:,} batches (example batch_size={batch_size}, "
+            f"candidate microbatch<={batch_size * len(MNLI_LABELS)})"
+        )
         predictions: list[str] = []
-        for start in range(0, len(premises), batch_size):
+        batch_starts = tqdm(
+            range(0, num_examples, batch_size),
+            total=num_batches,
+            desc=label,
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=2.0,
+        )
+        for start in batch_starts:
             prompts = [
                 self.format_prompt(premise, hypothesis)
                 for premise, hypothesis in zip(
@@ -230,6 +250,10 @@ class QwenNLIStudent:
             predictions.extend(
                 MNLI_LABELS[max(range(len(row)), key=row.__getitem__)]
                 for row in scores
+            )
+            batch_starts.set_postfix(
+                examples=f"{min(start + batch_size, num_examples):,}/{num_examples:,}",
+                refresh=False,
             )
         return predictions
 
@@ -249,9 +273,28 @@ class QwenNLIStudent:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
 
+        from tqdm.auto import tqdm
+
+        num_examples = len(premises)
+        num_batches = (num_examples + batch_size - 1) // batch_size
+        label = getattr(self, "progress_label", "NLI probability scoring")
+        print(
+            f"[PROGRESS] {label}: {num_examples:,} examples, "
+            f"{num_examples * len(MNLI_LABELS):,} candidate sequences, "
+            f"{num_batches:,} batches (example batch_size={batch_size}, "
+            f"candidate microbatch<={batch_size * len(MNLI_LABELS)})"
+        )
         probabilities: list[list[float]] = []
         torch = self._torch
-        for start in range(0, len(premises), batch_size):
+        batch_starts = tqdm(
+            range(0, num_examples, batch_size),
+            total=num_batches,
+            desc=label,
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=2.0,
+        )
+        for start in batch_starts:
             prompts = [
                 self.format_prompt(premise, hypothesis)
                 for premise, hypothesis in zip(
@@ -265,4 +308,8 @@ class QwenNLIStudent:
                     torch.tensor(row, dtype=torch.float64), dim=-1
                 )
                 probabilities.append(normalized.tolist())
+            batch_starts.set_postfix(
+                examples=f"{min(start + batch_size, num_examples):,}/{num_examples:,}",
+                refresh=False,
+            )
         return probabilities

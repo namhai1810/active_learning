@@ -84,6 +84,7 @@ def train_lora(
     import torch
     from peft import LoraConfig, PeftModel, TaskType, get_peft_model
     from torch.utils.data import DataLoader
+    from tqdm.auto import tqdm
 
     if not isinstance(student.model, PeftModel):
         peft_config = LoraConfig(
@@ -180,7 +181,15 @@ def train_lora(
     loss_count = 0
     for epoch_index in range(config.num_epochs):
         num_batches = len(data_loader)
-        for batch_index, batch in enumerate(data_loader):
+        batches = tqdm(
+            data_loader,
+            total=num_batches,
+            desc=f"LoRA training {epoch_index + 1}/{config.num_epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=2.0,
+        )
+        for batch_index, batch in enumerate(batches):
             example_ids = batch.pop("example_ids")
             batch = {
                 key: tensor.to(student.input_device)
@@ -204,6 +213,7 @@ def train_lora(
                 )
             total_loss += loss.detach().float().item()
             loss_count += 1
+            batches.set_postfix(loss=f"{loss.detach().float().item():.4f}", refresh=False)
             gradients = torch.autograd.grad(
                 loss,
                 trainable_parameters,

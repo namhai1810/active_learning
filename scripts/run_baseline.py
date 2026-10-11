@@ -190,6 +190,7 @@ def main() -> None:
 
     wall_start = time.perf_counter()
     gpu_timer = _start_gpu_timer(student)
+    student.progress_label = f"{args.method}: acquisition scoring"
     selected = baseline.acquire(
         pool=pool,
         budget=budget,
@@ -219,6 +220,7 @@ def main() -> None:
             hans_config.get("max_examples"), "hans.max_examples"
         ),
     )
+    student.progress_label = f"{args.method}: HANS evaluation"
     records, metrics = evaluate_hans(
         student,
         hans_examples,

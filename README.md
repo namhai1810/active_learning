@@ -69,6 +69,12 @@ Uncertainty), activate `active_lr` and run the non-overwriting orchestrator:
 bash run_hans_baselines_cuda0.sh
 ```
 
+To resume only selected stages, pass their names explicitly. For example:
+
+```bash
+bash run_hans_baselines_cuda0.sh random uncertainty
+```
+
 It saves per-stage logs under `logs/hans_baselines_seed42/` and builds a
 paper-ready Markdown report, tidy CSV/JSON exports, and SVG vector figures under
 `reports/hans_baselines_seed42/`. Completed stages are safely skipped on rerun;

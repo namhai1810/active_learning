@@ -20,4 +20,6 @@ model:
   trust_remote_code: false
   local_files_only: false
   max_length: 512
-  batch_size: 4
+  # Each example expands to three label candidates, so this is an effective
+  # forward microbatch of up to 48 sequences. Sized for ~25 GiB free VRAM.
+  batch_size: 16

@@ -5,3 +5,5 @@ outputs/*/
 test_*
 tests/*
 *.json
+*.log
+reports/*

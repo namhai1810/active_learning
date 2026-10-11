@@ -132,6 +132,7 @@ def main() -> None:
         local_files_only=bool(model_config.get("local_files_only", False)),
         max_length=int(model_config.get("max_length", 512)),
     )
+    student.progress_label = "zero-shot HANS evaluation"
     started_at = datetime.now(timezone.utc)
     wall_start = time.perf_counter()
     gpu_timer = _start_gpu_timer(student)
