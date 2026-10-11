@@ -17,8 +17,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.hans import HANSExample
+from src.benchmark.hans_manifest import FrozenHansManifest
 from src.data.pipeline_split import reconstruct_five_way_split
+from src.decision.cost_model import CostUsage, compute_cost, cost_rates_from_config
 from src.evaluation.hans import evaluate_hans
+from src.intervention.pilot import _start_gpu_timer, _stop_gpu_timer
 from src.models.qwen_nli import QwenNLIStudent
 from src.utils.artifacts import read_json, read_jsonl
 from src.utils.checkpoint import checkpoint_descriptor
@@ -176,6 +179,22 @@ def main() -> None:
     if not source_path.is_file():
         raise FileNotFoundError(f"Predictions not found: {source_path}")
     source = read_jsonl(source_path)
+    manifest_path_value = active.get("frozen_manifest_path")
+    frozen_manifest = None
+    if manifest_path_value is not None:
+        frozen_manifest = FrozenHansManifest.from_mapping(
+            read_json(Path(str(manifest_path_value)))
+        )
+        source_ids = {str(row["id"]) for row in source}
+        manifest_ids = set().union(
+            set(frozen_manifest.hypothesis_discovery_ids),
+            set(frozen_manifest.verification_ids),
+            set(frozen_manifest.intervention_pool_ids),
+            set(frozen_manifest.gain_eval_ids),
+            set(frozen_manifest.final_test_ids),
+        )
+        if source_ids != manifest_ids:
+            raise ValueError("Source IDs differ from the frozen Stage 2 manifest")
     output = run_dir / "active_learning"
     if output.exists() and any(output.iterdir()):
         if not args.overwrite:
@@ -211,11 +230,13 @@ def main() -> None:
             "--defer-final-test",
         )
         decision = read_json(round_dir / "decision" / "decision.json")
+        round_cost = read_json(round_dir / "decision" / "round_cost.json")
         record: dict[str, Any] = {
             "round": round_index,
             "starting_checkpoint": starting_checkpoint,
             "decision": decision,
             "spent_before": spent,
+            "cost": round_cost,
             "stages_completed": [
                 "discover_hypotheses",
                 "verify_failures",
@@ -225,6 +246,7 @@ def main() -> None:
             ],
         }
         if decision.get("action") == "stop":
+            spent += float(round_cost["incurred_exploration_cost"])
             record["ending_checkpoint"] = starting_checkpoint
             record["spent_after"] = spent
             rounds.append(record)
@@ -233,7 +255,7 @@ def main() -> None:
         selected_cost = decision.get("cost")
         if not isinstance(selected_cost, (int, float)) or isinstance(selected_cost, bool):
             raise ValueError("CONTINUE decision must contain a numeric cost")
-        spent += float(selected_cost)
+        spent += float(round_cost["realized_round_cost_after_continue"])
         next_checkpoint = read_json(round_dir / "decision" / "next_checkpoint.json")
         current_model["adapter_path"] = next_checkpoint["adapter_path"]
         ending_checkpoint = checkpoint_descriptor(current_model)
@@ -251,13 +273,32 @@ def main() -> None:
     split = reconstruct_five_way_split(source, require_mapping(config, "hans"))
     indexed = {str(row["id"]): row for row in source}
     final_rows = [indexed[item] for item in split.final_test_ids]
+    if any("premise" not in row or "gold" not in row for row in final_rows):
+        sealed_value = active.get("sealed_final_test_path")
+        if sealed_value is None:
+            raise ValueError(
+                "ID-only final rows require active_learning.sealed_final_test_path"
+            )
+        sealed = read_jsonl(Path(str(sealed_value)))
+        sealed_index = {str(row["id"]): row for row in sealed}
+        if set(sealed_index) != set(split.final_test_ids):
+            raise ValueError("Sealed final-test IDs differ from the frozen split")
+        if frozen_manifest is not None and set(sealed_index) != set(
+            frozen_manifest.final_test_ids
+        ):
+            raise ValueError("Sealed final-test IDs differ from the shared manifest")
+        final_rows = [sealed_index[item] for item in split.final_test_ids]
     final_checkpoint = checkpoint_descriptor(current_model)
     set_deterministic_seed(int(config["hans"]["split_seed"]))
     final_student = _student(current_model)
+    final_timer = _start_gpu_timer(final_student)
     final_predictions, final_metrics = evaluate_hans(
         final_student,
         _as_hans(final_rows),
         batch_size=int(current_model.get("batch_size", 4)),
+    )
+    final_gpu_seconds = float(
+        _stop_gpu_timer(final_student, final_timer) or 0.0
     )
     write_jsonl(output / "final_test_predictions.jsonl", final_predictions)
     write_json(
@@ -270,12 +311,27 @@ def main() -> None:
             **final_metrics,
         },
     )
+    adaptive_cost = spent
+    rates, currency = cost_rates_from_config(require_mapping(config, "cost"))
+    final_test_cost = compute_cost(
+        CostUsage(
+            evaluation_runs=1,
+            evaluation_items=len(final_rows),
+            evaluation_gpu_seconds=final_gpu_seconds,
+        ),
+        rates,
+        currency=currency,
+    ).to_dict()
+    spent += float(final_test_cost["total"])
+    write_json(output / "final_test_cost.json", final_test_cost)
     summary = {
         "mode": "llm_main",
         "max_rounds": max_rounds,
         "rounds_attempted": len(rounds),
         "rounds_updated": sum(row["decision"]["action"] == "continue" for row in rounds),
         "max_budget": max_budget,
+        "adaptive_modeled_cost": adaptive_cost,
+        "final_test_evaluation_cost": float(final_test_cost["total"]),
         "total_modeled_cost": spent,
         "stop_reason": stop_reason,
         "final_checkpoint": final_checkpoint,

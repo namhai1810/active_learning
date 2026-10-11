@@ -20,10 +20,13 @@ def compute_hans_metrics(
     gold_labels: Sequence[str],
     predictions: Sequence[str],
     heuristics: Sequence[str],
+    subcases: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Compute overall, per-label, and per-heuristic HANS accuracy."""
     if not (len(gold_labels) == len(predictions) == len(heuristics)):
         raise ValueError("gold_labels, predictions, and heuristics must align")
+    if subcases is not None and len(subcases) != len(gold_labels):
+        raise ValueError("subcases must align with gold_labels")
     if not gold_labels:
         raise ValueError("Cannot compute HANS metrics for an empty dataset")
 
@@ -66,6 +69,20 @@ def compute_hans_metrics(
         ]
         heuristic_accuracy[heuristic] = _accuracy(subset)
 
+    subcase_accuracy: dict[str, float | None] = {}
+    normalized_subcases: list[str] = []
+    if subcases is not None:
+        normalized_subcases = [str(value).strip() for value in subcases]
+        for subcase in sorted(set(normalized_subcases)):
+            subset = [
+                is_correct
+                for observed, is_correct in zip(
+                    normalized_subcases, correct, strict=True
+                )
+                if observed == subcase
+            ]
+            subcase_accuracy[subcase] = _accuracy(subset)
+
     return {
         "num_examples": len(correct),
         "num_correct": sum(correct),
@@ -73,6 +90,8 @@ def compute_hans_metrics(
         "entailment_accuracy": label_accuracy["entailment"],
         "non_entailment_accuracy": label_accuracy["non-entailment"],
         "accuracy_by_heuristic": heuristic_accuracy,
+        "accuracy_by_subcase": subcase_accuracy,
         "label_counts": dict(Counter(normalized_gold)),
         "heuristic_counts": dict(Counter(normalized_heuristics)),
+        "subcase_counts": dict(Counter(normalized_subcases)),
     }

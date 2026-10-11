@@ -59,5 +59,6 @@ def evaluate_hans(
         [record["gold"] for record in records],
         [record["prediction"] for record in records],
         [record["heuristic"] for record in records],
+        [record["subcase"] for record in records],
     )
     return records, metrics

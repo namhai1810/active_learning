@@ -66,6 +66,65 @@ def _allocated_teacher_usage(
     return {key: (value[0], value[1]) for key, value in allocated.items()}
 
 
+def build_round_incurred_cost(
+    *,
+    run_dir: str | Path,
+    pilot_observations: Sequence[Mapping[str, Any]],
+    cost_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Account once for every exploration resource, including STOP/no-candidate rounds."""
+    root = Path(run_dir)
+    rates, currency = cost_rates_from_config(cost_config)
+    projections_raw = cost_config.get("projections", {})
+    if not isinstance(projections_raw, Mapping):
+        raise ValueError("cost.projections must be a mapping")
+    input_tokens = 0.0
+    output_tokens = 0.0
+    for path in sorted((root / "teacher_calls").glob("*.jsonl")):
+        for record in _jsonl(path):
+            usage = record.get("usage")
+            if isinstance(usage, Mapping):
+                input_tokens += _number(usage, "input_tokens")
+                output_tokens += _number(usage, "output_tokens")
+    generated = len(_jsonl(root / "synthetic" / "generated.jsonl"))
+    probes = _jsonl(root / "verification" / "generated_probes.jsonl")
+    probe_predictions = _jsonl(root / "verification" / "probes.jsonl")
+    round_predictions = _jsonl(root / "predictions.jsonl")
+    pilot_gpu = sum(float(row.get("gpu_seconds") or 0.0) for row in pilot_observations)
+    pilot_eval_items = sum(
+        2 * len(row.get("eval_ids", []))
+        for row in pilot_observations
+        if isinstance(row.get("eval_ids"), list)
+    )
+    usage = CostUsage(
+        human_review_items=(generated + len(probes))
+        * _number(projections_raw, "human_review_items_per_verified_item", 0.0),
+        llm_input_tokens=input_tokens,
+        llm_output_tokens=output_tokens,
+        generated_items=generated,
+        verified_items=generated + len(probes),
+        lora_training_runs=len(pilot_observations),
+        lora_training_gpu_seconds=pilot_gpu,
+        evaluation_runs=(
+            2 * len(pilot_observations)
+            + len({str(row.get("hypothesis_id", "")) for row in probe_predictions})
+            + (1 if any("prediction" in row for row in round_predictions) else 0)
+        ),
+        evaluation_items=(
+            pilot_eval_items
+            + len(probe_predictions)
+            + sum("prediction" in row for row in round_predictions)
+        ),
+    )
+    result = compute_cost(usage, rates, currency=currency).to_dict()
+    result["measurement_status"] = {
+        "teacher_tokens": "measured",
+        "pilot_training_gpu_seconds": "measured_when_available",
+        "rates": "configured_assumptions",
+    }
+    return result
+
+
 def build_artifact_costs(
     *,
     run_dir: str | Path,
@@ -125,42 +184,72 @@ def build_artifact_costs(
             if isinstance(row.get("eval_ids"), list)
         )
         input_tokens, output_tokens = tokens.get(hypothesis_id, (0.0, 0.0))
-        projected_train_gpu = _number(
-            projections_raw, "lora_training_gpu_seconds_fixed"
-        ) + full_count * _number(
-            projections_raw, "lora_training_gpu_seconds_per_item"
+        projected_train_gpu = (
+            _number(projections_raw, "lora_training_gpu_seconds_fixed")
+            + full_count
+            * _number(projections_raw, "lora_training_gpu_seconds_per_item")
+            if full_count
+            else 0.0
         )
-        projected_eval_gpu = _number(
-            projections_raw, "evaluation_gpu_seconds_fixed"
-        ) + eval_count * _number(
-            projections_raw, "evaluation_gpu_seconds_per_item"
+        projected_eval_gpu = (
+            _number(projections_raw, "evaluation_gpu_seconds_fixed")
+            + eval_count
+            * _number(projections_raw, "evaluation_gpu_seconds_per_item")
+            if eval_count
+            else 0.0
         )
-        usage = CostUsage(
-            human_annotation_items=full_count
-            * _number(projections_raw, "human_annotation_items_per_training_item", 1.0),
+        incurred_usage = CostUsage(
+            # Synthetic labels are teacher-generated and QC'd. Human annotation
+            # is zero unless a run explicitly logs it elsewhere.
+            human_annotation_items=0.0,
             human_review_items=(generated_count + probe_count)
-            * _number(projections_raw, "human_review_items_per_verified_item", 1.0),
+            * _number(projections_raw, "human_review_items_per_verified_item", 0.0),
             llm_input_tokens=input_tokens,
             llm_output_tokens=output_tokens,
             generated_items=generated_count,
             verified_items=generated_count + probe_count,
-            lora_training_runs=len(pilots) + (1 if full_count else 0),
-            lora_training_gpu_seconds=pilot_gpu + projected_train_gpu,
+            lora_training_runs=len(pilots),
+            lora_training_gpu_seconds=pilot_gpu,
             evaluation_runs=(
                 2 * len(pilots)
-                + (2 if eval_count else 0)
                 + (1 if probe_eval_count else 0)
                 + (1 / len(ids) if ids and shared_eval_items else 0)
             ),
             evaluation_items=(
                 pilot_eval_items
-                + 2 * eval_count
                 + probe_eval_count
                 + (shared_eval_items / len(ids) if ids else 0)
             ),
+        )
+        projected_usage = CostUsage(
+            human_annotation_items=full_count
+            * _number(
+                projections_raw,
+                "human_annotation_items_per_training_item",
+                0.0,
+            ),
+            lora_training_runs=1 if full_count else 0,
+            lora_training_gpu_seconds=projected_train_gpu,
+            evaluation_runs=2 if eval_count else 0,
+            evaluation_items=2 * eval_count,
             evaluation_gpu_seconds=projected_eval_gpu,
         )
+        usage = incurred_usage.plus(projected_usage)
+        incurred = compute_cost(incurred_usage, rates, currency=currency)
+        projected = compute_cost(projected_usage, rates, currency=currency)
         breakdown = compute_cost(usage, rates, currency=currency)
+        payload = breakdown.to_dict()
+        payload["phases"] = {
+            "incurred_exploration": incurred.to_dict(),
+            "projected_intervention": projected.to_dict(),
+        }
+        payload["measurement_status"] = {
+            "teacher_tokens": "measured",
+            "pilot_training_gpu_seconds": "measured_when_available",
+            "full_training_gpu_seconds": "projected",
+            "full_evaluation_gpu_seconds": "projected",
+            "rates": "configured_assumptions",
+        }
         costs[hypothesis_id] = breakdown.total
-        breakdowns[hypothesis_id] = breakdown.to_dict()
+        breakdowns[hypothesis_id] = payload
     return costs, breakdowns

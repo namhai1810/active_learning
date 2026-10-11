@@ -131,6 +131,7 @@ def select_intervention(
     lambda_cost: float,
     *,
     max_cost: float | None = None,
+    budget_costs: Mapping[str, float] | None = None,
 ) -> InterventionDecision:
     """Select argmax U among budget-eligible candidates, otherwise STOP."""
     _, resolved_lambda = _validate_cost_inputs(0.0, lambda_cost)
@@ -148,7 +149,20 @@ def select_intervention(
         available = _finite_number(max_cost, "max_cost")
         if available < 0:
             raise ValueError("max_cost must be non-negative")
-        ranked = [candidate for candidate in ranked_all if candidate.cost <= available]
+        ranked = []
+        for candidate in ranked_all:
+            budget_cost = (
+                candidate.cost
+                if budget_costs is None
+                else _finite_number(
+                    budget_costs.get(candidate.hypothesis_id),
+                    f"budget_cost[{candidate.hypothesis_id}]",
+                )
+            )
+            if budget_cost < 0:
+                raise ValueError("candidate budget costs must be non-negative")
+            if budget_cost <= available:
+                ranked.append(candidate)
     else:
         ranked = ranked_all
     if not ranked_all:

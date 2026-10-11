@@ -98,17 +98,22 @@ def _synthetic_id(pair_id: str, pair_member: str) -> str:
 
 class TargetedSyntheticGenerator:
     def __init__(
-        self, teacher: TeacherLLM, config: SyntheticGenerationConfig
+        self,
+        teacher: TeacherLLM,
+        config: SyntheticGenerationConfig,
+        *,
+        failure_targeted: bool = True,
     ) -> None:
         self.teacher = teacher
         self.config = config
+        self.failure_targeted = failure_targeted
 
     def generate(
         self,
         hypothesis: FailureHypothesis,
         intervention_records: Sequence[Mapping[str, Any]],
     ) -> tuple[list[SyntheticNLIExample], dict[str, Any]]:
-        hypothesis.validate(require_llm_schema=True)
+        hypothesis.validate(require_llm_schema=self.failure_targeted)
         seen: set[str] = set()
         seeds = []
         for record in intervention_records:
@@ -136,9 +141,14 @@ class TargetedSyntheticGenerator:
         if not selected_seeds:
             raise ValueError("No permitted intervention seeds are available")
 
+        targeting_text = (
+            "failure-targeted"
+            if self.failure_targeted
+            else "broad-coverage, non-failure-targeted"
+        )
         system_prompt = (
-            "You generate NEW, original, failure-targeted three-class NLI TRAINING "
-            "PAIRS. A counterfactual pair changes the failure-relevant relation and "
+            f"You generate NEW, original, {targeting_text} three-class NLI TRAINING "
+            "PAIRS. A counterfactual pair changes the central semantic relation and "
             "must change its correct label. An invariant pair changes only irrelevant "
             "entities/surface details and must preserve its correct label. A reasoning "
             "contrast pair, when requested, contrasts the required reasoning step. Use "
@@ -165,8 +175,12 @@ class TargetedSyntheticGenerator:
             requested = min(run_end - offset, self.config.max_pairs_per_call)
             member_roles = SYNTHETIC_PAIR_MEMBERS[pair_type]
             payload = {
-                "task": "generate_new_targeted_structured_nli_training_pairs",
-                "failure_hypothesis": {
+                "task": (
+                    "generate_new_targeted_structured_nli_training_pairs"
+                    if self.failure_targeted
+                    else "generate_new_random_structured_nli_training_pairs"
+                ),
+                "generation_objective": {
                     "id": hypothesis.id,
                     "description": hypothesis.description,
                     "predicted_failure_behavior": hypothesis.predicted_failure_behavior,
@@ -220,7 +234,11 @@ class TargetedSyntheticGenerator:
                 "big",
             )
             call = TeacherCall(
-                task="targeted_synthetic_generation",
+                task=(
+                    "targeted_synthetic_generation"
+                    if self.failure_targeted
+                    else "random_synthetic_generation"
+                ),
                 prompt_version=self.config.prompt_version,
                 seed=derived_seed,
                 system_prompt=system_prompt,

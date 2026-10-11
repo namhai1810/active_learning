@@ -91,8 +91,10 @@ cost:
     evaluation_per_item: 0.0001
     evaluation_per_gpu_hour: 0.5
   projections:
-    human_annotation_items_per_training_item: 1.0
-    human_review_items_per_verified_item: 1.0
+    # Synthetic data is not human-annotated in this implementation.
+    human_annotation_items_per_training_item: 0.0
+    # QC/review is performed by the configured teacher, not a human.
+    human_review_items_per_verified_item: 0.0
     lora_training_gpu_seconds_fixed: 0.0
     lora_training_gpu_seconds_per_item: 0.2
     evaluation_gpu_seconds_fixed: 0.0

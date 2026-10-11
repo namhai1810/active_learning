@@ -1,0 +1,4 @@
+extends: main_synthetic_generation.yaml
+stage2_policy: random_non_failure_targeted
+stage2_generation_limit_examples: 320
+

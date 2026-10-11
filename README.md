@@ -215,6 +215,105 @@ dependent. The intervals, decisions, and stopping rule are therefore
 conditional diagnostics, not unconditional, causal, or profitability
 guarantees.
 
+## Stage 2 fair benchmark
+
+Stage 2 is deliberately separate from cost-aware stopping. Experiment A fixes
+the final-training data budget; Experiment B fixes four acquisitions of 32 new
+examples. All methods use the same frozen initial checkpoint, LoRA recipe,
+optimizer settings, HANS manifest, and MNLI evaluation implementation.
+
+Prepare the seed-independent HANS split once, before any HANS inference:
+
+```bash
+python scripts/prepare_stage2_benchmark.py \
+  --config configs/stage2_benchmark.yaml \
+  --output-dir outputs/stage2_shared
+```
+
+Build the three synthetic acquisition pools for seeds 42, 43, and 44. These
+commands use the same intervention seed role, teacher, generation/QC code, and a
+global limit of 320 generated examples per method. The no-verification policy
+uses discovered hypotheses without certification; the random policy uses a
+non-failure-targeted prompt and does not inspect discovered failures.
+
+```bash
+for seed in 42 43 44; do
+  python scripts/build_stage2_synthetic_pool.py \
+    --benchmark-config configs/stage2_benchmark.yaml \
+    --method random_synthetic --seed "$seed" \
+    --output-dir "outputs/stage2_acquisition/random_synthetic/seed_${seed}"
+
+  python scripts/build_stage2_synthetic_pool.py \
+    --benchmark-config configs/stage2_benchmark.yaml \
+    --method failure_driven_no_verification --seed "$seed" \
+    --output-dir "outputs/stage2_acquisition/failure_driven_no_verification/seed_${seed}"
+
+  python scripts/build_stage2_synthetic_pool.py \
+    --benchmark-config configs/stage2_benchmark.yaml \
+    --method ours_verified --seed "$seed" \
+    --output-dir "outputs/stage2_acquisition/ours_verified/seed_${seed}"
+done
+```
+
+Experiment A — one fixed-budget update at 32, 64, and 128 examples:
+
+```bash
+python scripts/run_stage2_suite.py \
+  --config configs/stage2_benchmark.yaml \
+  --experiment A \
+  --output-root outputs/stage2_runs
+```
+
+Experiment B — four rounds × 32 fresh examples, total 128:
+
+```bash
+python scripts/run_stage2_suite.py \
+  --config configs/stage2_benchmark.yaml \
+  --experiment B \
+  --output-root outputs/stage2_runs
+```
+
+Build the report without inventing missing results:
+
+```bash
+python scripts/report_stage2_benchmark.py \
+  --runs-root outputs/stage2_runs \
+  --output-dir reports/stage2
+```
+
+The report contains seed-level results plus mean, sample standard deviation, and
+a normal-approximation 95% interval. With three seeds, that interval is only a
+descriptive uncertainty summary. Accuracy curves use the independent
+`gain_eval` role and are evaluated post hoc after all acquisition/training
+decisions. The sealed final-test is opened exactly once per run for the frozen
+final checkpoint, so no intermediate final-test metric can influence acquisition.
+
+### Stage 2 fairness checklist
+
+- One manifest hash and identical final-test IDs for every method and seed.
+- Final-test inputs/labels are absent from adaptive artifacts; overlap auditing is
+  post-selection only and never acts as a training-data veto.
+- Exact budgets are 32/64/128 individual examples; synthetic budgets are even and
+  preserve complete pairs.
+- Missing valid synthetic examples produce an explicit shortage and are never
+  filled with unrelated data.
+- Random and Uncertainty acquire fresh, previously unseen MNLI examples after
+  each checkpoint update.
+- MNLI baselines are labeled cross-source; equal data access with HANS-guided
+  methods is not claimed.
+- All trained methods share the same per-example causal-LM cross-entropy recipe.
+  Pair structure controls selection only; no contrastive/consistency loss is
+  claimed.
+- Synthetic labels must be explicit entailment/neutral/contradiction labels; no
+  binary HANS non-entailment conversion is permitted.
+- Fixed-budget acquisition is reported separately from cost-aware stopping.
+- Raw measured quantities and assumed USD rates are saved separately.
+
+Remaining limitations include teacher/QC dependence, lexical rather than
+semantic near-duplicate auditing, only three experimental seeds, configured cost
+rates and projected compute, and filesystem separation rather than an external
+access-control service for sealed final-test data.
+
 ## Build debug-only HANS oracle hypotheses
 
 The remaining `oracle_hans_*` configs and oracle scripts are debug/reference

@@ -24,13 +24,15 @@ from src.data.pipeline_split import (
     validate_manifest,
 )
 from src.decision.cost_aware import build_decision_candidates, select_intervention
-from src.decision.artifact_cost import build_artifact_costs
+from src.decision.artifact_cost import build_artifact_costs, build_round_incurred_cost
+from src.decision.cost_model import CostUsage, compute_cost, cost_rates_from_config
 from src.evaluation.hans import evaluate_hans
 from src.hypotheses.types import FailureHypothesis
 from src.intervention.synthetic import (
     run_synthetic_full_intervention,
     select_full_synthetic_examples,
 )
+from src.intervention.pilot import _start_gpu_timer, _stop_gpu_timer
 from src.models.lora_training import LoraTrainingConfig, train_lora
 from src.models.qwen_nli import QwenNLIStudent
 from src.synthetic.types import SyntheticNLIExample
@@ -238,15 +240,16 @@ def main() -> None:
     }
     candidate_ids = list(example_count_costs)
     if cost_type == "full_pipeline":
+        accounting_ids = list(hypotheses)
         evaluation_counts = {
             hypothesis_id: len(raw_applicable_ids.get(hypothesis_id, []))
             if isinstance(raw_applicable_ids.get(hypothesis_id), list)
             else 0
-            for hypothesis_id in candidate_ids
+            for hypothesis_id in accounting_ids
         }
-        costs, cost_breakdowns = build_artifact_costs(
+        all_costs, all_cost_breakdowns = build_artifact_costs(
             run_dir=run_dir,
-            hypothesis_ids=candidate_ids,
+            hypothesis_ids=accounting_ids,
             full_training_counts={
                 key: int(value) for key, value in example_count_costs.items()
             },
@@ -254,9 +257,14 @@ def main() -> None:
             pilot_observations=observations,
             cost_config=cost_config,
         )
+        costs = {key: all_costs[key] for key in candidate_ids}
+        cost_breakdowns = {
+            key: all_cost_breakdowns[key] for key in candidate_ids
+        }
     else:
         costs = example_count_costs
         cost_breakdowns = None
+        all_cost_breakdowns = None
     # A certified hypothesis with no validated, non-pilot full data is not an
     # eligible intervention candidate and therefore cannot receive zero cost.
     eligible_verification = [
@@ -276,8 +284,33 @@ def main() -> None:
     remaining_budget = (
         None if remaining_budget_value is None else float(remaining_budget_value)
     )
+    round_incurred_cost = 0.0
+    round_incurred_breakdown: dict[str, Any] | None = None
+    projected_budget_costs: dict[str, float] | None = None
+    if cost_type == "full_pipeline":
+        round_incurred_breakdown = build_round_incurred_cost(
+            run_dir=run_dir,
+            pilot_observations=observations,
+            cost_config=cost_config,
+        )
+        round_incurred_cost = float(round_incurred_breakdown["total"])
+    if all_cost_breakdowns is not None:
+        projected_budget_costs = {
+            hypothesis_id: float(
+                item["phases"]["projected_intervention"]["total"]
+            )
+            for hypothesis_id, item in cost_breakdowns.items()
+        }
+    intervention_budget = (
+        None
+        if remaining_budget is None
+        else max(0.0, remaining_budget - round_incurred_cost)
+    )
     decision = select_intervention(
-        candidates, lambda_cost, max_cost=remaining_budget
+        candidates,
+        lambda_cost,
+        max_cost=intervention_budget,
+        budget_costs=projected_budget_costs,
     )
 
     output_dir = run_dir / "decision"
@@ -297,6 +330,9 @@ def main() -> None:
             "requested_full_intervention_size": full_size,
             "lambda_cost": lambda_cost,
             "remaining_budget": remaining_budget,
+            "incurred_exploration_cost": round_incurred_cost,
+            "incurred_exploration_breakdown": round_incurred_breakdown,
+            "available_projected_intervention_budget": intervention_budget,
             "candidates": [item.to_dict() for item in candidates],
         },
     )
@@ -312,6 +348,26 @@ def main() -> None:
         ),
     }
     write_json(output_dir / "decision.json", decision_payload)
+    selected_projected_cost = 0.0
+    if decision.selected_hypothesis_id and projected_budget_costs is not None:
+        selected_projected_cost = projected_budget_costs[
+            decision.selected_hypothesis_id
+        ]
+    round_cost_payload = {
+            "currency": cost_config.get("currency", "examples"),
+            "incurred_exploration_cost": round_incurred_cost,
+            "selected_projected_intervention_cost": selected_projected_cost,
+            "realized_round_cost_at_decision": round_incurred_cost,
+            "realized_round_cost_after_continue": (
+                round_incurred_cost + selected_projected_cost
+                if decision.action == "continue"
+                else round_incurred_cost
+            ),
+            "rates_are_configured_assumptions": True,
+            "all_hypothesis_breakdowns": all_cost_breakdowns or {},
+            "candidate_breakdowns": cost_breakdowns or {},
+        }
+    write_json(output_dir / "round_cost.json", round_cost_payload)
     frozen_decision = (output_dir / "decision.json").read_bytes()
     if decision.action == "stop":
         print(json.dumps(decision_payload, indent=2, sort_keys=True))
@@ -336,16 +392,32 @@ def main() -> None:
         set_deterministic_seed(intervention_seed)
         return _build_student(model)
 
+    measured_training_gpu_seconds = 0.0
+    measured_evaluation_gpu_seconds = 0.0
+
     def train_callback(
         student: QwenNLIStudent,
         examples: list[Any],
         adapter_dir: Path,
         intervention_seed: int,
     ) -> float:
-        return train_lora(student, examples, training, adapter_dir, intervention_seed)
+        nonlocal measured_training_gpu_seconds
+        timer = _start_gpu_timer(student)
+        loss = train_lora(
+            student, examples, training, adapter_dir, intervention_seed
+        )
+        measured_training_gpu_seconds += float(
+            _stop_gpu_timer(student, timer) or 0.0
+        )
+        return loss
 
     def risk_callback(student: QwenNLIStudent, selected: Any) -> float:
+        nonlocal measured_evaluation_gpu_seconds
+        timer = _start_gpu_timer(student)
         _, metrics = evaluate_hans(student, _as_hans(selected), batch_size=batch_size)
+        measured_evaluation_gpu_seconds += float(
+            _stop_gpu_timer(student, timer) or 0.0
+        )
         accuracy = metrics["overall_accuracy"]
         if accuracy is None:
             raise RuntimeError("Post-intervention gain evaluation returned no accuracy")
@@ -392,6 +464,29 @@ def main() -> None:
             "decision_recomputed": False,
         },
     )
+    if cost_type == "full_pipeline":
+        rates, currency = cost_rates_from_config(cost_config)
+        projections = cost_config.get("projections", {})
+        if not isinstance(projections, dict):
+            raise ValueError("cost.projections must be a mapping")
+        realized_usage = CostUsage(
+            human_annotation_items=len(selected_train)
+            * float(projections.get("human_annotation_items_per_training_item", 0.0)),
+            lora_training_runs=1,
+            lora_training_gpu_seconds=measured_training_gpu_seconds,
+            evaluation_runs=2,
+            evaluation_items=2 * len(result.eval_ids),
+            evaluation_gpu_seconds=measured_evaluation_gpu_seconds,
+        )
+        realized_intervention = compute_cost(
+            realized_usage, rates, currency=currency
+        ).to_dict()
+        round_cost_payload["realized_intervention"] = realized_intervention
+        round_cost_payload["realized_round_cost_after_continue"] = (
+            round_incurred_cost + float(realized_intervention["total"])
+        )
+        round_cost_payload["realized_uses_measured_gpu_time_when_available"] = True
+        write_json(output_dir / "round_cost.json", round_cost_payload)
 
     next_model = dict(model)
     next_model["adapter_path"] = result.adapter_path
@@ -406,9 +501,11 @@ def main() -> None:
     # final_test crosses the data firewall only now, after decision and training.
     final_records = materialize_role(indexed, split.final_test_ids, "final_test")
     final_student = _build_student(model, adapter_path=result.adapter_path)
+    final_timer = _start_gpu_timer(final_student)
     final_predictions, final_metrics = evaluate_hans(
         final_student, _as_hans(final_records), batch_size=batch_size
     )
+    final_gpu_seconds = float(_stop_gpu_timer(final_student, final_timer) or 0.0)
     write_jsonl(output_dir / "final_test_predictions.jsonl", final_predictions)
     write_json(
         output_dir / "final_test_metrics.json",
@@ -419,6 +516,23 @@ def main() -> None:
             **final_metrics,
         },
     )
+    if cost_type == "full_pipeline":
+        rates, currency = cost_rates_from_config(cost_config)
+        final_evaluation = compute_cost(
+            CostUsage(
+                evaluation_runs=1,
+                evaluation_items=len(final_records),
+                evaluation_gpu_seconds=final_gpu_seconds,
+            ),
+            rates,
+            currency=currency,
+        ).to_dict()
+        round_cost_payload["final_test_evaluation"] = final_evaluation
+        round_cost_payload["realized_total_including_final_test"] = (
+            float(round_cost_payload["realized_round_cost_after_continue"])
+            + float(final_evaluation["total"])
+        )
+        write_json(output_dir / "round_cost.json", round_cost_payload)
     if (output_dir / "decision.json").read_bytes() != frozen_decision:
         raise RuntimeError("Post-decision work modified the frozen decision")
     print(json.dumps(decision_payload, indent=2, sort_keys=True))

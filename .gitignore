@@ -4,9 +4,10 @@ __pycache__/
 outputs/*/
 test_*
 tests/*
-!tests/test_cost_aware.py
-!tests/test_multiround.py
 *.json
 *.log
 reports/*
 test_*
+!tests/test_cost_aware.py
+!tests/test_multiround.py
+!tests/test_stage2_benchmark.py

@@ -11,8 +11,9 @@ không phải online main flow trừ khi được ghi rõ.
 
 ## 1. Tóm tắt phương pháp
 
-Pipeline bắt đầu từ một student NLI cố định. Student được đánh giá trên HANS và
-prediction artifact được chia thành năm role rời nhau. Teacher LLM quan sát các
+Pipeline bắt đầu bằng một frozen, seed-independent HANS manifest. Chỉ bốn role
+adaptive được đánh giá trước; final-test chỉ tồn tại dưới dạng ID placeholder
+trong artifact mà pipeline nhìn thấy. Teacher LLM quan sát các
 lỗi ở discovery split để đề xuất failure hypotheses có thể kiểm chứng. Mỗi
 hypothesis được kiểm chứng bằng controlled probes mới, được sinh và QC hoàn toàn
 trước khi nhìn thấy student outcome. Hypothesis chỉ được giữ nếu lower confidence
@@ -22,14 +23,15 @@ Với mỗi hypothesis đã certified, teacher sinh các cặp NLI ba nhãn mớ
 được QC theo cả pair, lọc duplicate/leakage, rồi đưa vào các fresh-checkpoint
 pilot interventions rời nhau. Gain pilot được đo bằng mức giảm HANS risk trên
 `gain_eval`. Cuối cùng code dùng optimistic gain trừ acquisition cost để quyết
-định STOP hay CONTINUE. CONTINUE chạy đúng một fresh full LoRA intervention và
-chỉ sau đó mới đánh giá final-test.
+định STOP hay CONTINUE. CONTINUE chạy một fresh full LoRA intervention, checkpoint
+đó trở thành starting checkpoint của round kế tiếp. Final-test chỉ được mở và
+đánh giá sau khi toàn bộ adaptive loop đã kết thúc.
 
 ```text
 Student checkpoint
-    -> HANS predictions
-    -> deterministic five-way split
-    -> teacher critic estimates error probabilities
+    -> frozen deterministic five-way split before inference
+    -> non-final HANS predictions
+    -> [teacher critic estimates error probabilities
     -> teacher discovers failure hypotheses
     -> controlled probe generation and pre-outcome validation
     -> one-shot student verification
@@ -39,11 +41,12 @@ Student checkpoint
     -> gain estimate and UCB
     -> cost-aware STOP/CONTINUE
        -> STOP: no training
-       -> CONTINUE: one fresh full LoRA -> gain_eval -> final_test
+       -> CONTINUE: one fresh full LoRA -> gain_eval -> updated checkpoint] x T
+    -> one post-loop final-test evaluation
 ```
 
-Đây hiện là **one-round method**. Không có vòng lặp discovery → verification →
-intervention sau khi model đã được cập nhật.
+`run_main_active_learning.py` là multi-round implementation. Các stage scripts
+riêng vẫn tồn tại để reproduce one-round/debug runs.
 
 ---
 
@@ -53,7 +56,7 @@ intervention sau khi model đã được cập nhật.
 |---|---|
 | \(h\) | Failure hypothesis do teacher sinh |
 | \(K\) | Số hypothesis tối đa được tính trong union bound |
-| \(T\) | Số round trong confidence bound; main config hiện đặt \(T=1\) |
+| \(T\) | Maximum round count được pre-register trong confidence bound |
 | \(Z_{h,i}\) | Binary verification outcome của controlled set thứ \(i\) |
 | \(n_h\) | Số valid controlled sets của hypothesis \(h\) |
 | \(\widehat\nu_h\) | Empirical controlled-failure frequency |
@@ -64,7 +67,7 @@ intervention sau khi model đã được cập nhật.
 | \(\widehat\Delta_h\) | Mean pilot gain |
 | \(M\) | Bound giả định \(|X_{h,j}|\le M\) |
 | \(b_h\) | Gain confidence radius |
-| \(C(h)\) | Số validated examples trong full intervention |
+| \(C(h)\) | Tổng component cost đã quy đổi về currency/unit cấu hình |
 | \(\lambda\) | Cost coefficient `lambda_cost` |
 | \(\widehat J(h)\) | Estimated net value |
 | \(U(h)\) | Optimistic net value dùng để rank và stop |
@@ -81,10 +84,12 @@ intervention sau khi model đã được cập nhật.
 | Synthetic generation | `configs/main_synthetic_generation.yaml` | `scripts/generate_synthetic_interventions.py` |
 | Pilot gain | `configs/main_pilot_gain.yaml` | `scripts/run_main_pilot_gain.py` |
 | Cost-aware decision | `configs/main_cost_aware.yaml` | `scripts/run_main_decision.py` |
+| Multi-round main | `configs/main_multiround.yaml` | `scripts/run_main_active_learning.py` |
+| Frozen Stage 2 data | `configs/stage2_benchmark.yaml` | `scripts/prepare_stage2_benchmark.py` |
+| Fair Stage 2 run | `configs/stage2_benchmark.yaml` | `scripts/run_stage2_benchmark.py` |
 
-Các main configs kế thừa `configs/main_common.yaml`. `teacher.name_or_path` cố ý
-để `null`; phải chọn teacher rõ ràng trước khi chạy. Teacher lỗi làm pipeline dừng,
-không fallback ngầm sang HANS oracle.
+Các main configs kế thừa `configs/main_common.yaml`; teacher identity phải được
+freeze rõ ràng. Teacher lỗi làm pipeline dừng, không fallback ngầm sang HANS oracle.
 
 ```bash
 python scripts/evaluate_hans.py --config configs/hans_qwen17b.yaml
@@ -223,13 +228,21 @@ Code kiểm tra:
 
 Đây là hash split, không stratify theo gold, heuristic hoặc subcase.
 
-### Data-firewall caveat
+### Stage 2 sealed data firewall
 
-Code chỉ materialize final-test sau full intervention. Tuy nhiên
-`predictions.jsonl` ban đầu đã chứa text/prediction của toàn HANS và được load để
-reconstruct split. Firewall vì thế là **logical control-flow firewall**, không
-phải physical access isolation. Nếu paper yêu cầu sealed test set theo nghĩa
-mạnh, cần tách artifact/quyền truy cập ngay từ đầu.
+`prepare_stage2_benchmark.py` tạo manifest trước inference, đánh giá chỉ non-final
+roles và ghi final-test vào sealed artifact riêng. Round artifacts chỉ có final
+IDs; không có input, label, prediction hoặc metric. `run_main_active_learning.py`
+chỉ đọc sealed artifact sau khi mọi acquisition/training/STOP decision đã freeze.
+Standalone legacy evaluation scripts vẫn có thể đánh giá full HANS và không được
+dùng làm Stage 2 benchmark input.
+
+Trong fixed-budget benchmark, các checkpoint trung gian chỉ được đánh giá post
+hoc trên `gain_eval` để tạo accuracy-vs-examples/cost curves. Sealed `final_test`
+được mở đúng một lần cho final checkpoint; MNLI matched/mismatched cũng chỉ được
+đánh giá sau khi acquisition và training đã kết thúc. ID overlap làm run không
+hợp lệ; lexical near-duplicate audit được log sau training và không được dùng để
+thay đổi acquisition.
 
 ---
 
@@ -516,7 +529,7 @@ tau_v: 0.5
 n_probe_sets: 50
 min_valid_probe_sets: 40
 K: 5
-T: 1
+T: 5
 ```
 
 Với 50 valid sets:
@@ -799,16 +812,18 @@ phải exact required size. Empty reserve làm hypothesis không eligible.
 
 ### 11.2 Cost definition
 
-\[
-C(h)=|S_h^{full}|,
-\]
+`cost.type: full_pipeline` lưu component ledger gồm teacher input/output tokens,
+generation/QC, verification, pilots, LoRA training và evaluation. Ledger tách:
 
-với \(S_h^{full}\) là actual validated, non-pilot full set.
+1. `incurred_exploration`: resource đã tiêu trước decision và vẫn phải tính khi STOP;
+2. `projected_intervention`: marginal full-training/evaluation resource chưa commit;
+3. realized cumulative cost: incurred plus measured full training/evaluation
+   cost khi CONTINUE (GPU timing nếu runtime hỗ trợ), cộng final evaluation sau loop.
 
-Cost không bao gồm critic/generation/QC calls, pilot compute, GPU/wall-clock hoặc
-full-training compute ngoài số examples. Synthetic data đã được sinh trước
-decision, nên \(C(h)\) là proxy cost của prospective full intervention, không phải
-end-to-end cost của pipeline.
+Teacher tokens và pilot GPU time được đo khi provider/runtime cung cấp; full-run
+GPU time và USD rates là configured assumptions/projections. Shared calls được
+phân bổ một lần. Synthetic examples mặc định có zero human-annotation items;
+human cost chỉ khác zero khi có human work thực sự được log/cấu hình.
 
 ### 11.3 Eligibility
 
@@ -850,25 +865,14 @@ h^*=\arg\max_{h\in\mathcal H_{eligible}}U(h).
 CONTINUE không bảo đảm realized gain dương; nó chỉ nói positive net value chưa bị
 loại dưới optimistic bound và assumptions.
 
-### 11.6 Numeric behavior của default config
+### 11.6 Numeric behavior
 
-Với \(M=1,m=4,K=5,T=1,\delta=0.05,\lambda=0.001,C=128\):
+Với pilot count nhỏ, union-adjusted UCB có thể rất rộng. Phải report actual
+radius và không diễn giải CONTINUE là guaranteed profitability. Vì `C(h)` dùng
+currency cấu hình, không được thay số example count vào equation này.
 
-\[
-b=\sqrt{\frac{2\log(200)}{4}}\approx1.627624.
-\]
-
-Vì \(\widehat\Delta\ge-1\):
-
-\[
-U_{min}=-1+1.627624-0.001(128)\approx0.499624>0.
-\]
-
-Do đó với defaults, **mọi eligible candidate đều CONTINUE**. STOP thực tế chỉ xảy
-ra khi không có eligible candidate hoặc khi đổi \(m,\delta,\lambda,C\) đủ mạnh.
-Bound không sai algebraically nhưng rất lỏng và không clip về natural gain bound
-1. Không nên mô tả default run là meaningful stopping demonstration nếu chưa điều
-chỉnh thiết kế.
+STOP/CONTINUE phụ thuộc actual pilot observations, configured rates/projections và
+remaining budget. Báo cáo phải lưu từng component thay vì chỉ một scalar tổng.
 
 ---
 
@@ -887,15 +891,16 @@ script.
 ### 12.3 CONTINUE
 
 1. Lấy non-pilot full reserve của selected hypothesis.
-2. Xác nhận frozen cost bằng đúng actual training count.
+2. Xác nhận actual training count bằng frozen selection plan; cost scalar được
+   kiểm tra riêng bằng component ledger.
 3. Load fresh student từ cùng starting checkpoint như pilots.
 4. Không promote/reuse pilot adapter.
 5. Train đúng một full LoRA với cùng recipe.
 6. Đo before/after risk trên full applicable `gain_eval` subset.
 7. Ghi metrics nhưng không recompute decision.
-8. Sau đó mới materialize `final_test`.
-9. Load base/current checkpoint cộng new full adapter.
-10. Evaluate final HANS.
+8. Trong multi-round mode, ghi `next_checkpoint.json` và chưa mở final-test.
+9. Round kế tiếp dùng adapter vừa lưu làm starting checkpoint.
+10. Sau khi loop kết thúc mới mở sealed final-test và evaluate đúng post-loop.
 11. Xác nhận frozen decision bytes không thay đổi.
 
 Observed full gain:
@@ -1154,15 +1159,16 @@ INPUT:
 - concentration coverage đúng dưới dependencies do cùng LLM sinh;
 - CONTINUE bảo đảm positive realized gain;
 - STOP loại trừ mọi unseen useful intervention;
-- one-step stop kéo dài sang multi-step repairs;
+- candidate-set-relative STOP loại trừ mọi future multi-step repair;
 - final-test được physical isolation khỏi experimenter.
 
 ---
 
 ## 18. Mismatch/risk cần kiểm tra khi viết paper
 
-1. **One-round, không phải multi-round.** \(T\) đi vào bound nhưng không có outer
-   loop thực thi \(T>1\).
+1. **Adaptive bounds vẫn có assumptions.** Outer loop tồn tại, nhưng \(K\times T\)
+   union adjustment chỉ hợp lệ nếu mỗi constituent interval conditionally valid
+   theo prior history.
 2. **`exponential` thực chất là logistic weighting.** Equation và tên phải thống
    nhất.
 3. **Independent validation dùng cùng teacher.** Có pre-outcome independence,
@@ -1172,11 +1178,11 @@ INPUT:
 5. **Partial pilots vẫn eligible.** Actual \(m_h<m\) vẫn được estimate nếu
    \(m_h\ge1\).
 6. **Full size có thể nhỏ hơn requested size.** Config hiện là maximum budget.
-7. **Cost chỉ là proxy.** Không tính generation/QC/pilot/compute cost và data đã
-   sinh trước decision.
-8. **Default UCB quá lỏng để stop.** Mọi eligible default candidate CONTINUE.
-9. **Final-test firewall không phải sealed storage.** Initial predictions đã chứa
-   final outcomes dù decision code không dùng.
+7. **USD cost là assumed.** Quantities measured/projected được tách rõ, nhưng rates
+   vẫn do config đặt và projection error có thể đổi decision.
+8. **UCB có thể quá lỏng.** Phải report actual radius và sensitivity.
+9. **Sealed artifact không phải OS access control.** Code không truyền final content
+   vào adaptive stages, nhưng experimenter vẫn quản lý filesystem.
 10. **Leakage detector là lexical.** Token-set Jaccard bỏ word order/multiplicity
     và có thể bỏ sót semantic paraphrase.
 11. **Same-teacher QC có correlated-error risk.** Nên cân nhắc second model,
@@ -1188,8 +1194,8 @@ INPUT:
 
 ## 19. Cấu trúc Method gợi ý cho paper
 
-1. **Problem setup**: student, failure distribution, intervention cost và one-round
-   objective.
+1. **Problem setup**: student, failure distribution, component intervention cost và
+   adaptive finite-horizon objective.
 2. **Data-role separation**: five-way split và no-cross-role-use protocol.
 3. **Failure discovery**: gold-blind critic, error sampling, challenging correct
    contrasts và hypothesis schema.
@@ -1200,10 +1206,10 @@ INPUT:
 6. **Pilot gain estimation**: fresh checkpoint, disjoint pilots, risk reduction,
    gain UCB.
 7. **Cost-aware action selection**: \(\widehat J(h)\), \(U(h)\), argmax và STOP.
-8. **Full intervention and held-out evaluation**: frozen decision, one fresh LoRA,
-   final-test protocol.
+8. **Multi-round update and held-out evaluation**: checkpoint transition, disjoint
+   gain shards và post-loop sealed final-test protocol.
 9. **Assumptions and limitations**: boundedness, independence, generated-data
-   dependence, non-causality và one-round scope.
+   dependence, non-causality và finite-horizon conditional scope.
 
 Ngôn ngữ nên dùng:
 
@@ -1211,7 +1217,7 @@ Ngôn ngữ nên dùng:
 "conditional on boundedness and sufficient independence assumptions"
 "controlled reproducibility certificate"
 "optimistic eligibility rule"
-"one-step, candidate-set-relative stopping decision"
+"finite-horizon, candidate-set-relative stopping decision"
 ```
 
 Không nên claim khi chưa có bằng chứng bổ sung:
@@ -1221,7 +1227,7 @@ Không nên claim khi chưa có bằng chứng bổ sung:
 "guaranteed beneficial intervention"
 "globally safe stopping"
 "independent validation" nếu hiểu là independent model
-"multi-round active learning" cho implementation hiện tại
+"unconditional adaptive confidence guarantee"
 ```
 
 ---

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -90,6 +91,16 @@ def main() -> None:
     generation = require_mapping(config, "synthetic_generation")
     validation = require_mapping(config, "synthetic_validation")
     teacher_config = require_mapping(config, "teacher")
+    stage2_policy = str(
+        config.get("stage2_policy", "failure_targeted_verified")
+    )
+    allowed_policies = {
+        "failure_targeted_verified",
+        "failure_targeted_verification_bypassed",
+        "random_non_failure_targeted",
+    }
+    if stage2_policy not in allowed_policies:
+        raise ValueError(f"Unsupported stage2_policy: {stage2_policy}")
     teacher = build_teacher(teacher_config)
     generation_config = SyntheticGenerationConfig(
         counterfactual_pairs_per_hypothesis=int(
@@ -127,11 +138,15 @@ def main() -> None:
     run_dir = Path(args.run_dir)
     required = {
         "predictions": run_dir / "predictions.jsonl",
-        "hypotheses": run_dir / "hypotheses.json",
         "manifest": run_dir / "hans_split_v2.json",
-        "verification": run_dir / "verification" / "results.json",
-        "verification_probes": run_dir / "verification" / "generated_probes.jsonl",
     }
+    if stage2_policy != "random_non_failure_targeted":
+        required["hypotheses"] = run_dir / "hypotheses.json"
+    if stage2_policy == "failure_targeted_verified":
+        required["verification"] = run_dir / "verification" / "results.json"
+        required["verification_probes"] = (
+            run_dir / "verification" / "generated_probes.jsonl"
+        )
     for path in required.values():
         if not path.is_file():
             raise FileNotFoundError(f"Required artifact not found: {path}")
@@ -157,24 +172,83 @@ def main() -> None:
     intervention = materialize_role(
         indexed, split.intervention_pool_ids, "intervention_pool"
     )
-    hypotheses = _load_candidates(read_json(required["hypotheses"]))
-    verification_payload = read_json(required["verification"])
-    if verification_payload.get("split_version") != HANS_FIVE_WAY_SPLIT_VERSION:
-        raise ValueError("Verification used an incompatible split manifest")
-    certified = _certified_ids(verification_payload)
-    unknown = sorted(set(certified) - set(hypotheses))
-    if unknown:
-        raise ValueError(f"Certified hypotheses are missing from candidates: {unknown}")
+    if stage2_policy == "random_non_failure_targeted":
+        support_id = str(intervention[0]["id"])
+        random_hypothesis = FailureHypothesis(
+            id="stage2_random_synthetic",
+            name="Random synthetic NLI coverage",
+            description=(
+                "Generate diverse controlled NLI pairs without targeting an "
+                "observed student failure."
+            ),
+            predicted_failure_behavior="No failure behavior is targeted.",
+            predicted_failure_labels=("entailment", "non-entailment"),
+            verification_criteria=("Pair has valid explicit three-class NLI labels.",),
+            intervention_target="Broad random NLI coverage with controlled pairs.",
+            support_example_ids=(support_id,),
+            source="stage2_random_baseline",
+            prompt_version=generation_config.prompt_version,
+        )
+        hypotheses = {random_hypothesis.id: random_hypothesis}
+        certified = [random_hypothesis.id]
+        verification_payload = None
+    else:
+        hypotheses = _load_candidates(read_json(required["hypotheses"]))
+        if stage2_policy == "failure_targeted_verified":
+            verification_payload = read_json(required["verification"])
+            if verification_payload.get("split_version") != HANS_FIVE_WAY_SPLIT_VERSION:
+                raise ValueError("Verification used an incompatible split manifest")
+            certified = _certified_ids(verification_payload)
+        else:
+            verification_payload = None
+            certified = list(hypotheses)
+        unknown = sorted(set(certified) - set(hypotheses))
+        if unknown:
+            raise ValueError(f"Selected hypotheses are missing from candidates: {unknown}")
 
-    generator = TargetedSyntheticGenerator(teacher, generation_config)
+    stage2_limit_value = config.get("stage2_generation_limit_examples")
+    stage2_global_limit = (
+        None if stage2_limit_value is None else int(stage2_limit_value)
+    )
+    if stage2_global_limit is not None:
+        if stage2_global_limit <= 0 or stage2_global_limit % 2:
+            raise ValueError("stage2_generation_limit_examples must be positive and even")
+        if stage2_global_limit != generation_config.total_examples:
+            raise ValueError(
+                "Stage 2 global generation limit must equal the configured base "
+                "pair schedule; it is divided across selected hypotheses"
+            )
     generated_all = []
     accepted_all = []
     rejected_all: list[dict[str, Any]] = []
     call_logs: list[dict[str, Any]] = []
     counts: dict[str, dict[str, int]] = {}
     quality_all = {}
-    for hypothesis_id in certified:
+    for hypothesis_index, hypothesis_id in enumerate(certified):
         hypothesis = hypotheses[hypothesis_id]
+        current_generation_config = generation_config
+        if stage2_global_limit is not None and certified:
+            count = len(certified)
+            current_generation_config = replace(
+                generation_config,
+                counterfactual_pairs_per_hypothesis=(
+                    generation_config.counterfactual_pairs_per_hypothesis // count
+                    + (hypothesis_index < generation_config.counterfactual_pairs_per_hypothesis % count)
+                ),
+                invariant_pairs_per_hypothesis=(
+                    generation_config.invariant_pairs_per_hypothesis // count
+                    + (hypothesis_index < generation_config.invariant_pairs_per_hypothesis % count)
+                ),
+                reasoning_contrast_pairs_per_hypothesis=(
+                    generation_config.reasoning_contrast_pairs_per_hypothesis // count
+                    + (hypothesis_index < generation_config.reasoning_contrast_pairs_per_hypothesis % count)
+                ),
+            )
+        generator = TargetedSyntheticGenerator(
+            teacher,
+            current_generation_config,
+            failure_targeted=stage2_policy != "random_non_failure_targeted",
+        )
         generated, generation_log = generator.generate(hypothesis, intervention)
         quality, quality_log = quality_judge.judge(hypothesis, generated)
         duplicate_quality_ids = set(quality_all) & set(quality)
@@ -199,8 +273,10 @@ def main() -> None:
     leakage_records.extend(materialize_role(indexed, split.gain_eval_ids, "gain_eval"))
     # Generated verification probes are local veto references only. Their text
     # is loaded after generation/QC and is never a training seed or teacher input.
-    verification_probes = read_jsonl(
-        required["verification_probes"], allow_empty=True
+    verification_probes = (
+        read_jsonl(required["verification_probes"], allow_empty=True)
+        if "verification_probes" in required
+        else []
     )
     leakage_records.extend(
         {
@@ -247,6 +323,11 @@ def main() -> None:
         {
             "mode": "llm_main",
             "oracle_debug": False,
+            "stage2_policy": stage2_policy,
+            "stage2_generation_limit_examples": stage2_global_limit,
+            "verification_required": stage2_policy == "failure_targeted_verified",
+            "binary_hans_labels_converted": False,
+            "pair_selection_unit": "complete_pair",
             "teacher": {
                 "provider": teacher_config.get("provider", "huggingface"),
                 "name_or_path": teacher_config.get("name_or_path"),

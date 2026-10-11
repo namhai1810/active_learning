@@ -1,0 +1,70 @@
+extends: baseline_common.yaml
+
+# One immutable split for every method and all seeds. Run preparation once.
+stage2_benchmark:
+  manifest_seed: 20261011
+  preparation_seed: 42
+  seeds: [42, 43, 44]
+  budgets: [32, 64, 128]
+  frozen_manifest_path: outputs/stage2_shared/hans_frozen_manifest.json
+  sealed_final_test_path: outputs/stage2_shared/sealed_final_test.jsonl
+  near_duplicate_threshold: 0.92
+  synthetic_artifacts:
+    random_synthetic:
+      accepted: outputs/stage2_acquisition/random_synthetic/seed_{seed}/synthetic/accepted.jsonl
+      provenance: outputs/stage2_acquisition/random_synthetic/seed_{seed}/synthetic/manifest.json
+      teacher_calls_dir: outputs/stage2_acquisition/random_synthetic/seed_{seed}/teacher_calls
+    failure_driven_no_verification:
+      accepted: outputs/stage2_acquisition/failure_driven_no_verification/seed_{seed}/synthetic/accepted.jsonl
+      provenance: outputs/stage2_acquisition/failure_driven_no_verification/seed_{seed}/synthetic/manifest.json
+      teacher_calls_dir: outputs/stage2_acquisition/failure_driven_no_verification/seed_{seed}/teacher_calls
+    ours_verified:
+      accepted: outputs/stage2_acquisition/ours_verified/seed_{seed}/synthetic/accepted.jsonl
+      provenance: outputs/stage2_acquisition/ours_verified/seed_{seed}/synthetic/manifest.json
+      teacher_calls_dir: outputs/stage2_acquisition/ours_verified/seed_{seed}/teacher_calls
+
+hans:
+  name: hans
+  data_file: https://raw.githubusercontent.com/tommccoy1/hans/7299f6f657089ce06a0f98e7e81f8d0f5b7741ce/heuristics_evaluation_set.txt
+  split: validation
+  cache_dir: null
+  max_examples: null
+  discovery_fraction: 0.125
+  verification_fraction: 0.125
+  intervention_fraction: 0.125
+  gain_eval_fraction: 0.125
+  split_seed: 20261011
+
+mnli_pool:
+  name: nyu-mll/glue
+  config: mnli
+  split: train
+  cache_dir: null
+  max_examples: null
+
+mnli_evaluation:
+  name: nyu-mll/glue
+  config: mnli
+  matched_split: validation_matched
+  mismatched_split: validation_mismatched
+  cache_dir: null
+  max_examples: null
+
+# Rates are assumptions for cost-axis plots; raw measured quantities are always
+# retained separately in result.json.
+cost:
+  type: full_pipeline
+  currency: USD
+  rates:
+    human_annotation_per_item: 0.0
+    human_review_per_item: 0.0
+    llm_input_per_1k_tokens: 0.0002
+    llm_output_per_1k_tokens: 0.0006
+    data_generation_per_item: 0.001
+    data_verification_per_item: 0.001
+    lora_training_per_run: 0.02
+    lora_training_per_gpu_hour: 0.5
+    evaluation_per_run: 0.005
+    evaluation_per_item: 0.0001
+    evaluation_per_gpu_hour: 0.5
+
