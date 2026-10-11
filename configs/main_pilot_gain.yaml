@@ -1,0 +1,18 @@
+extends: main_common.yaml
+
+pilot:
+  m: 4
+  pilot_train_size: 32
+  gain_eval_size: 64
+  seed: 42
+  applicability_seed: 42
+  max_records_per_call: 50
+  prompt_version: hypothesis_operationalization_v1
+  preserve_adapters: true
+
+gain:
+  M: 1.0
+  delta: 0.05
+  K: 5
+  T: 1
+  tolerance: 1.0e-12

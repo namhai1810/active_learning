@@ -1,0 +1,65 @@
+mode: oracle_hans
+oracle_debug: true
+
+hans:
+  discovery_fraction: 0.125
+  verification_fraction: 0.125
+  intervention_fraction: 0.125
+  gain_eval_fraction: 0.125
+  split_seed: 42
+
+ablation:
+  seed: 42
+
+decision:
+  lambda_cost: 0.001
+
+cost:
+  type: acquired_examples
+
+intervention:
+  full_intervention_size: 128
+  seed: 42
+  non_entailment_label: contradiction
+
+pilot:
+  m: 4
+  pilot_train_size: 32
+  gain_eval_size: 64
+  seed: 42
+  non_entailment_label: contradiction
+
+gain:
+  M: 1.0
+  tolerance: 1.0e-12
+
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  adapter_path: null
+  device_map: cuda:1
+  dtype: float32
+  trust_remote_code: false
+  local_files_only: false
+  max_length: 512
+  batch_size: 4
+
+training:
+  num_epochs: 1
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00001
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  max_length: 512
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  gradient_checkpointing: false

@@ -1,0 +1,22 @@
+extends: oracle_hans_theory_validation.yaml
+
+reference_data:
+  file: ../tests/fixtures/theory_reference_smoke.jsonl
+  use_precomputed_predictions: true
+
+verification_validation:
+  n_values: [10, 20]
+  gamma: 0.1
+  reference_probe_count: 12
+  seed: 42
+
+gain_validation:
+  m_values: [2, 4]
+  reference_repetitions: 2
+  M: 1.0
+  tolerance: 1.0e-12
+  seed: 4242
+  generate_online_pilots: false
+  generate_reference_repetitions: false
+  precomputed_reference_observations_file: ../tests/fixtures/theory_gain_reference_smoke.jsonl
+  allow_small_reference_for_smoke: true

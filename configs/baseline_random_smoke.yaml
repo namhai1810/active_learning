@@ -1,0 +1,9 @@
+# Small engineering smoke test; not a benchmark result.
+extends: baseline_random.yaml
+run_name: baseline_random_smoke
+overwrite: true
+acquisition_budget: 18
+pool:
+  max_examples: 32
+hans:
+  max_examples: 2

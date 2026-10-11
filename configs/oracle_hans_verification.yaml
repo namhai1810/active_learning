@@ -1,0 +1,17 @@
+mode: oracle_hans
+oracle_debug: true
+
+hans:
+  discovery_fraction: 0.125
+  verification_fraction: 0.125
+  intervention_fraction: 0.125
+  gain_eval_fraction: 0.125
+  split_seed: 42
+
+verification:
+  delta: 0.05
+  tau_v: 0.5
+  n_probes: 50
+  max_hypotheses_per_round: 3
+  max_rounds: 1
+  seed: 42

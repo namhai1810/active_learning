@@ -15,7 +15,7 @@ dataset:
 model:
   name_or_path: Qwen/Qwen3-1.7B
   adapter_path: null
-  device_map: auto
+  device_map: cuda:0
   dtype: bfloat16
   trust_remote_code: false
   local_files_only: false

@@ -1,0 +1,21 @@
+extends: main_common.yaml
+
+hypothesis_generation:
+  max_hypotheses: 5
+  max_error_examples: 80
+  max_contrast_examples: 20
+  sampling_strategy: exponential
+  sampling_alpha: 0.5
+  sampling_beta: 10.0
+  sampling_threshold: 0.7
+  # Correct controls with high estimated error probability are deliberately
+  # preferred: they are challenging false alarms for the critic, not easy cases.
+  contrast_sampling_strategy: highest_error_score
+  seed: 42
+  prompt_version: failure_discovery_v1
+  error_scorer:
+    type: teacher_llm
+    source: teacher_llm_critic
+    max_records_per_call: 40
+    seed: 42
+    prompt_version: discovery_error_probability_v1

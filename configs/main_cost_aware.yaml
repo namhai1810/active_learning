@@ -1,0 +1,16 @@
+extends: main_common.yaml
+
+decision:
+  # Must be fixed before inspecting full-intervention or final-test outcomes.
+  lambda_cost: 0.001
+
+cost:
+  type: validated_synthetic_examples
+
+intervention:
+  full_intervention_size: 128
+  seed: 42
+
+gain:
+  M: 1.0
+  tolerance: 1.0e-12

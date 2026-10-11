@@ -1,0 +1,84 @@
+mode: oracle_hans
+oracle_debug: true
+
+hans:
+  discovery_fraction: 0.125
+  verification_fraction: 0.125
+  intervention_fraction: 0.125
+  gain_eval_fraction: 0.125
+  split_seed: 42
+
+online_constants:
+  delta: 0.05
+  tau_v: 0.5
+  K: 3
+  T: 1
+
+reference_data:
+  # Required: separate HANS-style JSONL with verification_reference and
+  # gain_reference roles whose IDs do not occur in the online manifest.
+  file: null
+  use_precomputed_predictions: false
+
+verification_validation:
+  n_values: [10, 20, 50, 100, 200]
+  gamma: 0.1
+  reference_probe_count: 1000
+  seed: 42
+
+gain_validation:
+  m_values: [2, 4, 8, 16]
+  reference_repetitions: 32
+  M: 1.0
+  tolerance: 1.0e-12
+  seed: 4242
+  generate_online_pilots: true
+  generate_reference_repetitions: true
+  precomputed_reference_observations_file: null
+  allow_small_reference_for_smoke: false
+
+stopping_validation:
+  enabled: true
+
+decision:
+  lambda_cost: 0.001
+
+intervention:
+  full_intervention_size: 128
+
+pilot:
+  pilot_train_size: 32
+  gain_eval_size: 64
+  seed: 42
+  non_entailment_label: contradiction
+
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  adapter_path: null
+  device_map: cuda:1
+  dtype: float32
+  trust_remote_code: false
+  local_files_only: false
+  max_length: 512
+  batch_size: 4
+
+training:
+  num_epochs: 1
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00001
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  max_length: 512
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  gradient_checkpointing: false

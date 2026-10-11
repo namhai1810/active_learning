@@ -1,0 +1,53 @@
+mode: llm_main
+oracle_debug: false
+
+hans:
+  discovery_fraction: 0.125
+  verification_fraction: 0.125
+  intervention_fraction: 0.125
+  gain_eval_fraction: 0.125
+  split_seed: 42
+
+# Centralized teacher configuration inherited by every main-stage config.
+# To scale the teacher later, change only name_or_path (or point it at a local
+# checkpoint); the stage-specific configs should continue extending this file.
+teacher:
+  provider: huggingface
+  name_or_path: Qwen/Qwen3-14B
+  device_map: auto
+  dtype: bfloat16
+  trust_remote_code: false
+  local_files_only: false
+  max_input_tokens: 8192
+  max_new_tokens: 2048
+
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  adapter_path: null
+  device_map: auto
+  dtype: bfloat16
+  trust_remote_code: false
+  local_files_only: false
+  max_length: 512
+  batch_size: 4
+
+training:
+  num_epochs: 1
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00001
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  max_length: 512
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  gradient_checkpointing: false

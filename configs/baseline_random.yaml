@@ -1,0 +1,3 @@
+extends: baseline_common.yaml
+method: random
+run_name: baseline_random_b32_seed42

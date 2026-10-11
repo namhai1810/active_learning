@@ -1,0 +1,5 @@
+# Small logging/evaluation smoke test; not a benchmark result.
+extends: baseline_base.yaml
+run_name: baseline_base_smoke
+hans:
+  max_examples: 2

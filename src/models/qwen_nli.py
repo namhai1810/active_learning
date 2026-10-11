@@ -64,7 +64,9 @@ class QwenNLIStudent:
         if adapter_path:
             from peft import PeftModel
 
-            self.model = PeftModel.from_pretrained(self.model, adapter_path)
+            self.model = PeftModel.from_pretrained(
+                self.model, adapter_path, is_trainable=True
+            )
         self.model.eval()
 
     @property
@@ -72,7 +74,8 @@ class QwenNLIStudent:
         """Device holding the input embeddings (also works with device maps)."""
         return self.model.get_input_embeddings().weight.device
 
-    def _prompt(self, premise: str, hypothesis: str) -> str:
+    def format_prompt(self, premise: str, hypothesis: str) -> str:
+        """Format the shared inference/training prompt for one NLI pair."""
         messages = [
             {
                 "role": "system",
@@ -106,6 +109,31 @@ class QwenNLIStudent:
             "Classify the relationship as entailment, neutral, or contradiction.\n"
             f"Premise: {premise}\nHypothesis: {hypothesis}\nLabel:"
         )
+
+    def encode_training_example(
+        self,
+        premise: str,
+        hypothesis: str,
+        label: str,
+        max_length: int | None = None,
+    ) -> tuple[list[int], list[int]]:
+        """Encode prompt and target, masking prompt tokens in the loss labels."""
+        if label not in MNLI_LABELS:
+            raise ValueError(f"Unsupported MNLI training label: {label!r}")
+        limit = self.max_length if max_length is None else max_length
+        prompt_ids = self.tokenizer.encode(
+            self.format_prompt(premise, hypothesis), add_special_tokens=False
+        )
+        target_ids = self.tokenizer.encode(" " + label, add_special_tokens=False)
+        if self.tokenizer.eos_token_id is not None:
+            target_ids.append(self.tokenizer.eos_token_id)
+        available = limit - len(target_ids)
+        if available < 1:
+            raise ValueError("max_length is too short for the training target")
+        prompt_ids = self._truncate_prompt(prompt_ids, available)
+        input_ids = prompt_ids + target_ids
+        labels = [-100] * len(prompt_ids) + target_ids
+        return input_ids, labels
 
     def _truncate_prompt(self, token_ids: list[int], available: int) -> list[int]:
         if len(token_ids) <= available:
@@ -191,7 +219,7 @@ class QwenNLIStudent:
         predictions: list[str] = []
         for start in range(0, len(premises), batch_size):
             prompts = [
-                self._prompt(premise, hypothesis)
+                self.format_prompt(premise, hypothesis)
                 for premise, hypothesis in zip(
                     premises[start : start + batch_size],
                     hypotheses[start : start + batch_size],
@@ -204,3 +232,37 @@ class QwenNLIStudent:
                 for row in scores
             )
         return predictions
+
+    def predict_proba(
+        self,
+        premises: Sequence[str],
+        hypotheses: Sequence[str],
+        batch_size: int = 4,
+    ) -> list[list[float]]:
+        """Return normalized probabilities in ``MNLI_LABELS`` order.
+
+        The class distribution is the softmax over normalized conditional
+        label log-likelihoods used by :meth:`predict`.
+        """
+        if len(premises) != len(hypotheses):
+            raise ValueError("premises and hypotheses must have the same length")
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+
+        probabilities: list[list[float]] = []
+        torch = self._torch
+        for start in range(0, len(premises), batch_size):
+            prompts = [
+                self.format_prompt(premise, hypothesis)
+                for premise, hypothesis in zip(
+                    premises[start : start + batch_size],
+                    hypotheses[start : start + batch_size],
+                    strict=True,
+                )
+            ]
+            for row in self._score_candidates(prompts):
+                normalized = torch.softmax(
+                    torch.tensor(row, dtype=torch.float64), dim=-1
+                )
+                probabilities.append(normalized.tolist())
+        return probabilities

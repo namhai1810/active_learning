@@ -1,0 +1,9 @@
+# Small engineering smoke test; not a benchmark result.
+extends: baseline_uncertainty.yaml
+run_name: baseline_uncertainty_smoke
+overwrite: true
+acquisition_budget: 4
+pool:
+  max_examples: 8
+hans:
+  max_examples: 2

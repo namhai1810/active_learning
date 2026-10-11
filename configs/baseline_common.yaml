@@ -1,0 +1,49 @@
+seed: 42
+acquisition_budget: 32
+output_dir: outputs
+overwrite: false
+
+pool:
+  name: nyu-mll/glue
+  config: mnli
+  split: train
+  cache_dir: null
+  max_examples: 512
+
+hans:
+  name: hans
+  data_file: https://raw.githubusercontent.com/tommccoy1/hans/7299f6f657089ce06a0f98e7e81f8d0f5b7741ce/heuristics_evaluation_set.txt
+  split: validation
+  cache_dir: null
+  max_examples: null
+
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  adapter_path: null
+  device_map: cuda:0
+  dtype: float32
+  trust_remote_code: false
+  local_files_only: false
+  max_length: 512
+  batch_size: 4
+
+training:
+  num_epochs: 1
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 0.00001
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  max_length: 512
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  gradient_checkpointing: false
