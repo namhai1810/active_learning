@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.hypotheses.types import FailureHypothesis
-from src.teacher.base import TeacherCall, TeacherLLM
+from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
 
 
 OPERATIONALIZATION_PROMPT_VERSION = "hypothesis_operationalization_v1"
@@ -161,8 +161,7 @@ class LLMHypothesisOperationalizer:
                 {
                     "hypothesis_id": hypothesis.id,
                     "split_role": expected_role,
-                    "teacher_call": call.to_dict(),
-                    "teacher_response": response,
+                    **teacher_exchange_log(self.teacher, call, response),
                 }
             )
             if not response["testable"]:

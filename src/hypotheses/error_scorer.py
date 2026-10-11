@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from src.teacher.base import TeacherCall, TeacherLLM
+from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
 
 
 ERROR_SCORING_PROMPT_VERSION = "discovery_error_probability_v1"
@@ -168,8 +168,7 @@ class TeacherErrorProbabilityScorer:
                 {
                     "scoring_method": self.method,
                     "scoring_source": self.config.source,
-                    "teacher_call": call.to_dict(),
-                    "teacher_response": response,
+                    **teacher_exchange_log(self.teacher, call, response),
                 }
             )
         if set(scores) != set(ids):

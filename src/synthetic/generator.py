@@ -11,7 +11,7 @@ from typing import Any
 from src.data.labels import MNLI_LABELS
 from src.hypotheses.types import FailureHypothesis
 from src.synthetic.types import SYNTHETIC_PAIR_MEMBERS, SyntheticNLIExample
-from src.teacher.base import TeacherCall, TeacherLLM
+from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
 
 
 SYNTHETIC_PROMPT_VERSION = "targeted_synthetic_nli_pairs_v2"
@@ -285,7 +285,7 @@ class TargetedSyntheticGenerator:
                 if returned_members != set(member_roles):
                     raise ValueError("Synthetic pair is missing a required member role")
             call_logs.append(
-                {"teacher_call": call.to_dict(), "teacher_response": response}
+                teacher_exchange_log(self.teacher, call, response)
             )
             offset += requested
             batch_index += 1

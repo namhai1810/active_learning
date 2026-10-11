@@ -5,7 +5,29 @@ decision:
   lambda_cost: 0.001
 
 cost:
-  type: validated_synthetic_examples
+  type: full_pipeline
+  currency: USD
+  rates:
+    human_annotation_per_item: 0.01
+    human_review_per_item: 0.002
+    llm_input_per_1k_tokens: 0.0002
+    llm_output_per_1k_tokens: 0.0006
+    data_generation_per_item: 0.001
+    data_verification_per_item: 0.001
+    lora_training_per_run: 0.02
+    lora_training_per_gpu_hour: 0.5
+    evaluation_per_run: 0.005
+    evaluation_per_item: 0.0001
+    evaluation_per_gpu_hour: 0.5
+  # Full-training/evaluation resources are projected before selection. Measured
+  # pilot and teacher usage is read from the round artifacts.
+  projections:
+    human_annotation_items_per_training_item: 1.0
+    human_review_items_per_verified_item: 1.0
+    lora_training_gpu_seconds_fixed: 0.0
+    lora_training_gpu_seconds_per_item: 0.2
+    evaluation_gpu_seconds_fixed: 0.0
+    evaluation_gpu_seconds_per_item: 0.02
 
 intervention:
   full_intervention_size: 128

@@ -9,16 +9,15 @@ The primary research path is now distinct from the HANS oracle/reference path:
 
 ```text
 Qwen HANS predictions -> deterministic five-way split
--> teacher-generated failure candidates -> independent verification + LCB
--> new teacher-generated three-class NLI data -> quality/leakage filtering
--> disjoint synthetic pilots -> gain UCB and cost-aware STOP/CONTINUE
--> one fresh full LoRA intervention (CONTINUE only) -> final held-out HANS
+-> [discover -> verify + LCB -> generate/QC -> pilot gain UCB
+    -> full cost-aware STOP/CONTINUE -> fresh LoRA update] x T
+-> one final held-out HANS evaluation after the adaptive loop terminates
 ```
 
-`configs/main_common.yaml` deliberately leaves `teacher.name_or_path: null`.
-Choose an appropriate local path or Hugging Face model ID before running the
-main method. A missing/failed teacher is an error; the code never silently
-substitutes the HANS oracle.
+`configs/main_common.yaml` centralizes the explicit teacher choice. Replace its
+model ID with an appropriate local path or Hugging Face model ID when needed. A
+missing/failed teacher is an error; the code never silently substitutes the
+HANS oracle.
 
 ## Setup
 
@@ -87,8 +86,35 @@ Start from an existing HANS evaluation directory containing the unsplit
 12.5/12.5/12.5/12.5/50 split. The compatible main manifest is
 `hans_split_v2.json`.
 
-After setting the same explicit teacher configuration in each inherited main
-config, run the stages in order:
+For the proposed multi-round method, configure the teacher and cost rates in
+`configs/main_multiround.yaml`, then run:
+
+```bash
+python scripts/run_main_active_learning.py \
+  --config configs/main_multiround.yaml \
+  --run-dir outputs/<existing_run>
+```
+
+Every attempted round is saved under `active_learning/rounds/round_NNN/` and
+executes discovery, verification, targeted generation/QC, pilot estimation, and
+a frozen STOP/CONTINUE decision. CONTINUE trains from that round's starting
+checkpoint, and the saved adapter becomes the next round's checkpoint. The loop
+stops when the eligible maximum of
+`U(h) = delta_hat(h) + radius(h) - lambda_cost*C(h)` is non-positive, no
+candidate is eligible, the next candidate exceeds the remaining budget, the
+budget is consumed, or `max_rounds` is reached. `rounds.jsonl` and
+`summary.json` record checkpoint transitions and cumulative modeled cost.
+
+Final-test rows are reduced to ID-only placeholders in all adaptive round
+artifacts. Their text, labels, and previous predictions are materialized only
+after termination, when the final checkpoint is evaluated once. Gain-evaluation
+IDs are deterministically partitioned into disjoint round shards. Discovery
+data may be revisited to diagnose an updated student, but it is never used as
+gain evaluation or final test data.
+
+The individual stage commands remain available for compatible one-round runs
+and debugging. After setting the same teacher configuration in each inherited
+main config, run them in order:
 
 ```bash
 python scripts/build_hypotheses.py \
@@ -144,16 +170,50 @@ Pilot synthetic pairs are disjoint across pilots and are never split across
 pilot/full selections. Training remains the existing per-example MNLI
 cross-entropy; no unsupported contrastive loss is implied. All pilot models begin
 from the same checkpoint, and pilot examples are excluded from the full-data
-reserve. `run_main_decision.py` freezes
-`U(h) = delta_hat(h) + radius(h) - lambda_cost * C(h)` before any full
-intervention. STOP performs no training. CONTINUE runs exactly one fresh full
-LoRA, reports gain on the preselected `gain_eval` subset, and only then
-materializes and evaluates `final_test` with the same HANS evaluator.
+reserve. `run_main_decision.py` freezes the utility before any full
+intervention. STOP performs no training. In standalone mode, CONTINUE runs one
+fresh full LoRA and only then evaluates `final_test`. The multi-round controller
+uses `--defer-final-test`, records `next_checkpoint.json`, and promotes that
+adapter only to the next round.
+
+### Full cost model
+
+The primary method uses `cost.type: full_pipeline`. `C(h)` is a scalar in the
+configured currency with a saved component ledger covering:
+
+- human annotation and review items;
+- measured teacher-LLM input and output tokens;
+- generated and verified data items;
+- measured pilot plus projected full LoRA runs/GPU time; and
+- pilot/full evaluation runs, items, and projected GPU time.
+
+Rates live under `cost.rates`; pre-decision projections for resources not yet
+committed live under `cost.projections`. Candidate artifacts store quantities,
+rates, subtotals, currency, and the total used in the utility. Teacher/pilot
+usage is measured, whereas full-intervention GPU time must be projected to keep
+the decision frozen. Rates and projections must be fixed without inspecting
+final-test or post-intervention outcomes. The historical
+`validated_synthetic_examples` mode remains accepted by the standalone script
+for reproduction, and oracle debug/baseline paths retain their prior costs.
 
 Teacher request/response envelopes, prompt versions, deterministic seeds,
 selected IDs, QC rejections, gain measurements, and decision artifacts are
-saved beneath the run directory. The concentration bounds remain conditional
-on their stated boundedness/independence assumptions and are not causal claims.
+saved beneath the run directory. Local Hugging Face teacher logs also include
+measured input/output token counts and generation time.
+
+The configured `K*T` factor union-adjusts verification and gain intervals over
+the predeclared maximum hypotheses per round and maximum rounds. This supports
+adaptive selection only if every constituent interval remains valid conditional
+on all earlier-round history: observations must be bounded, fresh round outcomes
+must satisfy the required conditional independence (or another valid
+conditional concentration argument), the conditional target mean must be well
+defined, and no current outcome may influence its own probe, applicability, or
+sample selection. Disjoint gain shards, disjoint pilot batches, pre-outcome
+probe freezing, and round-specific seeds reduce reuse and feedback; they do not
+prove these assumptions. Generated scenarios and related LoRA runs may remain
+dependent. The intervals, decisions, and stopping rule are therefore
+conditional diagnostics, not unconditional, causal, or profitability
+guarantees.
 
 ## Build debug-only HANS oracle hypotheses
 

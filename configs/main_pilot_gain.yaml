@@ -14,5 +14,7 @@ gain:
   M: 1.0
   delta: 0.05
   K: 5
-  T: 1
+  # Family-wise accounting horizon. Standalone one-round runs still use the
+  # complete gain_eval split; the multi-round runner overrides current_round.
+  T: 5
   tolerance: 1.0e-12

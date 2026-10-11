@@ -4,6 +4,9 @@ __pycache__/
 outputs/*/
 test_*
 tests/*
+!tests/test_cost_aware.py
+!tests/test_multiround.py
 *.json
 *.log
 reports/*
+test_*

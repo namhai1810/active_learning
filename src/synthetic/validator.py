@@ -10,7 +10,7 @@ from typing import Any
 
 from src.hypotheses.types import FailureHypothesis
 from src.synthetic.types import SYNTHETIC_PAIR_MEMBERS, SyntheticNLIExample
-from src.teacher.base import TeacherCall, TeacherLLM
+from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
 
 
 QUALITY_PROMPT_VERSION = "synthetic_pair_quality_control_v2"
@@ -282,7 +282,7 @@ class TeacherSyntheticQualityJudge:
                     "Quality batch must return exactly one decision per input"
                 )
             logs.append(
-                {"teacher_call": call.to_dict(), "teacher_response": response}
+                teacher_exchange_log(self.teacher, call, response)
             )
         expected_ids = {item.id for item in examples}
         if set(decisions) != expected_ids:

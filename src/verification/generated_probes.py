@@ -11,7 +11,7 @@ from typing import Any, Protocol
 
 from src.data.labels import HANS_LABELS, MNLI_LABELS, mnli_to_hans, normalize_mnli_label
 from src.hypotheses.types import FailureHypothesis
-from src.teacher.base import TeacherCall, TeacherLLM
+from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
 
 
 VERIFICATION_PROBE_PROMPT_VERSION = "controlled_verification_probes_v1"
@@ -353,7 +353,7 @@ class ControlledVerificationProbeGenerator:
                             generator_prompt_version=self.config.prompt_version,
                         )
                     )
-            logs.append({"teacher_call": call.to_dict(), "teacher_response": response})
+            logs.append(teacher_exchange_log(self.teacher, call, response))
             remaining -= requested
             batch_index += 1
         return generated, {
@@ -500,7 +500,7 @@ class TeacherVerificationProbeValidator:
                 )
             if returned_ids != expected_ids:
                 raise ValueError("Probe validator must decide every supplied probe")
-            logs.append({"teacher_call": call.to_dict(), "teacher_response": response})
+            logs.append(teacher_exchange_log(self.teacher, call, response))
         return decisions, {"hypothesis_id": hypothesis.id, "calls": logs}
 
 

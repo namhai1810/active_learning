@@ -232,6 +232,7 @@ def run_synthetic_full_intervention(
     student_factory: StudentFactory,
     train_callback: TrainCallback,
     risk_callback: RiskCallback,
+    expected_training_examples: int | None = None,
 ) -> FullInterventionResult:
     """Execute one fresh full run only after a frozen CONTINUE decision."""
     if decision.action != "continue" or decision.selected_hypothesis_id is None:
@@ -244,8 +245,12 @@ def run_synthetic_full_intervention(
     )
     if sum(len(group) for group in pair_groups) != len(training_examples):
         raise ValueError("Full intervention requires complete synthetic pairs")
-    if decision.cost != float(len(training_examples)):
-        raise ValueError("Frozen decision cost differs from actual full data count")
+    if expected_training_examples is None:
+        # Compatibility for the historical acquired-example-count cost mode.
+        if decision.cost != float(len(training_examples)):
+            raise ValueError("Frozen decision cost differs from actual full data count")
+    elif expected_training_examples != len(training_examples):
+        raise ValueError("Selected training count differs from the frozen candidate plan")
     adapter_dir = Path(output_dir) / hypothesis_id / "adapter"
     student = student_factory(seed)
     wall_start = time.perf_counter()

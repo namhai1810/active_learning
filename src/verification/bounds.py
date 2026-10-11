@@ -16,6 +16,11 @@ def empirical_mean(outcomes: Sequence[int]) -> float:
 
 
 def confidence_radius(n: int, K: int, T: int, delta: float) -> float:
+    """K-by-T union-adjusted radius, conditional on per-round validity.
+
+    Adaptive choice of a hypothesis/round is covered by the union only if each
+    constituent bound remains valid conditional on all earlier-round history.
+    """
     if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
         raise ValueError("n must be a positive integer")
     if isinstance(K, bool) or not isinstance(K, int) or K <= 0:

@@ -24,6 +24,7 @@ from src.data.pipeline_split import (
     validate_manifest,
 )
 from src.decision.cost_aware import build_decision_candidates, select_intervention
+from src.decision.artifact_cost import build_artifact_costs
 from src.evaluation.hans import evaluate_hans
 from src.hypotheses.types import FailureHypothesis
 from src.intervention.synthetic import (
@@ -45,6 +46,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--defer-final-test",
+        action="store_true",
+        help="Do not expose final_test; used by the multi-round controller",
+    )
     return parser.parse_args()
 
 
@@ -137,8 +143,12 @@ def main() -> None:
     gain_config = require_mapping(config, "gain")
     model = require_mapping(config, "model")
     training = LoraTrainingConfig.from_mapping(require_mapping(config, "training"))
-    if cost_config.get("type") != "validated_synthetic_examples":
-        raise ValueError("Main method requires cost.type: validated_synthetic_examples")
+    cost_type = cost_config.get("type")
+    if cost_type not in {"validated_synthetic_examples", "full_pipeline"}:
+        raise ValueError(
+            "Main method requires cost.type: full_pipeline or "
+            "validated_synthetic_examples"
+        )
     lambda_cost = float(decision_config["lambda_cost"])
     full_size = int(intervention["full_intervention_size"])
     seed = int(intervention.get("seed", 42))
@@ -221,11 +231,32 @@ def main() -> None:
         )
         for hypothesis_id in hypotheses
     }
-    costs = {
+    example_count_costs = {
         hypothesis_id: float(len(examples))
         for hypothesis_id, examples in full_sets.items()
         if examples
     }
+    candidate_ids = list(example_count_costs)
+    if cost_type == "full_pipeline":
+        evaluation_counts = {
+            hypothesis_id: len(raw_applicable_ids.get(hypothesis_id, []))
+            if isinstance(raw_applicable_ids.get(hypothesis_id), list)
+            else 0
+            for hypothesis_id in candidate_ids
+        }
+        costs, cost_breakdowns = build_artifact_costs(
+            run_dir=run_dir,
+            hypothesis_ids=candidate_ids,
+            full_training_counts={
+                key: int(value) for key, value in example_count_costs.items()
+            },
+            evaluation_counts=evaluation_counts,
+            pilot_observations=observations,
+            cost_config=cost_config,
+        )
+    else:
+        costs = example_count_costs
+        cost_breakdowns = None
     # A certified hypothesis with no validated, non-pilot full data is not an
     # eligible intervention candidate and therefore cannot receive zero cost.
     eligible_verification = [
@@ -235,9 +266,19 @@ def main() -> None:
         and str(item.get("hypothesis_id", "")) in costs
     ]
     candidates = build_decision_candidates(
-        eligible_verification, raw_estimates, costs, lambda_cost
+        eligible_verification,
+        raw_estimates,
+        costs,
+        lambda_cost,
+        cost_breakdowns=cost_breakdowns,
     )
-    decision = select_intervention(candidates, lambda_cost)
+    remaining_budget_value = decision_config.get("remaining_budget")
+    remaining_budget = (
+        None if remaining_budget_value is None else float(remaining_budget_value)
+    )
+    decision = select_intervention(
+        candidates, lambda_cost, max_cost=remaining_budget
+    )
 
     output_dir = run_dir / "decision"
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -251,9 +292,11 @@ def main() -> None:
         {
             "mode": "llm_main",
             "oracle_debug": False,
-            "cost_type": "validated_synthetic_examples",
+            "cost_type": cost_type,
+            "cost_currency": cost_config.get("currency", "examples"),
             "requested_full_intervention_size": full_size,
             "lambda_cost": lambda_cost,
+            "remaining_budget": remaining_budget,
             "candidates": [item.to_dict() for item in candidates],
         },
     )
@@ -321,6 +364,7 @@ def main() -> None:
         student_factory=student_factory,
         train_callback=train_callback,
         risk_callback=risk_callback,
+        expected_training_examples=len(selected_train),
     )
     if checkpoint_descriptor(model) != checkpoint:
         raise RuntimeError("Starting checkpoint changed during full intervention")
@@ -348,6 +392,16 @@ def main() -> None:
             "decision_recomputed": False,
         },
     )
+
+    next_model = dict(model)
+    next_model["adapter_path"] = result.adapter_path
+    next_checkpoint = checkpoint_descriptor(next_model)
+    write_json(output_dir / "next_checkpoint.json", next_checkpoint)
+    if args.defer_final_test:
+        if (output_dir / "decision.json").read_bytes() != frozen_decision:
+            raise RuntimeError("Post-decision work modified the frozen decision")
+        print(json.dumps(decision_payload, indent=2, sort_keys=True))
+        return
 
     # final_test crosses the data firewall only now, after decision and training.
     final_records = materialize_role(indexed, split.final_test_ids, "final_test")

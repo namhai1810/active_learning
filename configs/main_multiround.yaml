@@ -1,0 +1,103 @@
+extends: main_common.yaml
+
+active_learning:
+  max_rounds: 5
+  max_budget: 25.0
+
+hypothesis_generation:
+  max_hypotheses: 5
+  max_error_examples: 80
+  max_contrast_examples: 20
+  sampling_strategy: exponential
+  sampling_alpha: 0.5
+  sampling_beta: 10.0
+  sampling_threshold: 0.7
+  contrast_sampling_strategy: highest_error_score
+  seed: 42
+  prompt_version: failure_discovery_v1
+  error_scorer:
+    type: teacher_llm
+    source: teacher_llm_critic
+    max_records_per_call: 40
+    seed: 42
+    prompt_version: discovery_error_probability_v1
+
+verification:
+  delta: 0.05
+  tau_v: 0.5
+  n_probe_sets: 50
+  min_valid_probe_sets: 40
+  max_hypotheses_per_round: 5
+  max_rounds: 5
+  max_context_records: 24
+  max_probe_sets_per_call: 8
+  near_duplicate_threshold: 0.92
+  validation_max_probe_sets_per_call: 8
+  seed: 42
+  label_validation_seed: 314159
+  probe_prompt_version: controlled_verification_probes_v1
+  label_validation_prompt_version: verification_probe_validation_v1
+
+synthetic_generation:
+  counterfactual_pairs_per_hypothesis: 80
+  invariant_pairs_per_hypothesis: 80
+  reasoning_contrast_pairs_per_hypothesis: 0
+  max_seed_examples: 24
+  max_pairs_per_call: 8
+  seed: 42
+  prompt_version: targeted_synthetic_nli_pairs_v2
+
+synthetic_validation:
+  near_duplicate_threshold: 0.92
+  min_sentence_tokens: 3
+  max_sentence_tokens: 80
+  max_examples_per_call: 24
+  seed: 42
+  prompt_version: synthetic_pair_quality_control_v2
+
+pilot:
+  m: 4
+  pilot_train_size: 32
+  gain_eval_size: 12
+  seed: 42
+  applicability_seed: 42
+  max_records_per_call: 50
+  prompt_version: hypothesis_operationalization_v1
+  preserve_adapters: true
+
+gain:
+  M: 1.0
+  delta: 0.05
+  K: 5
+  T: 5
+  tolerance: 1.0e-12
+
+decision:
+  lambda_cost: 0.01
+
+cost:
+  type: full_pipeline
+  currency: USD
+  rates:
+    human_annotation_per_item: 0.01
+    human_review_per_item: 0.002
+    llm_input_per_1k_tokens: 0.0002
+    llm_output_per_1k_tokens: 0.0006
+    data_generation_per_item: 0.001
+    data_verification_per_item: 0.001
+    lora_training_per_run: 0.02
+    lora_training_per_gpu_hour: 0.5
+    evaluation_per_run: 0.005
+    evaluation_per_item: 0.0001
+    evaluation_per_gpu_hour: 0.5
+  projections:
+    human_annotation_items_per_training_item: 1.0
+    human_review_items_per_verified_item: 1.0
+    lora_training_gpu_seconds_fixed: 0.0
+    lora_training_gpu_seconds_per_item: 0.2
+    evaluation_gpu_seconds_fixed: 0.0
+    evaluation_gpu_seconds_per_item: 0.02
+
+intervention:
+  full_intervention_size: 128
+  seed: 42

@@ -55,6 +55,7 @@ def build_decision_candidates(
     gain_estimates: Sequence[Mapping[str, Any]],
     costs: Mapping[str, float],
     lambda_cost: float,
+    cost_breakdowns: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[DecisionCandidate]:
     """Join certified hypotheses to valid gain estimates and rank by U."""
     _validate_cost_inputs(0.0, lambda_cost)
@@ -108,6 +109,11 @@ def build_decision_candidates(
             optimistic_net_value=compute_optimistic_net_value(
                 delta_hat, radius, cost, resolved_lambda
             ),
+            cost_breakdown=(
+                None
+                if cost_breakdowns is None
+                else dict(cost_breakdowns.get(hypothesis_id, {}))
+            ),
         )
         candidates.append(candidate)
 
@@ -121,21 +127,31 @@ def build_decision_candidates(
 
 
 def select_intervention(
-    candidates: Sequence[DecisionCandidate], lambda_cost: float
+    candidates: Sequence[DecisionCandidate],
+    lambda_cost: float,
+    *,
+    max_cost: float | None = None,
 ) -> InterventionDecision:
-    """Apply exactly argmax U and STOP iff the candidate set is empty or max U<=0."""
+    """Select argmax U among budget-eligible candidates, otherwise STOP."""
     _, resolved_lambda = _validate_cost_inputs(0.0, lambda_cost)
-    ranked = sorted(
+    ranked_all = sorted(
         candidates,
         key=lambda candidate: (
             -candidate.optimistic_net_value,
             candidate.hypothesis_id,
         ),
     )
-    for candidate in ranked:
+    for candidate in ranked_all:
         if candidate.lambda_cost != resolved_lambda:
             raise ValueError("Candidate lambda_cost does not match decision lambda_cost")
-    if not ranked:
+    if max_cost is not None:
+        available = _finite_number(max_cost, "max_cost")
+        if available < 0:
+            raise ValueError("max_cost must be non-negative")
+        ranked = [candidate for candidate in ranked_all if candidate.cost <= available]
+    else:
+        ranked = ranked_all
+    if not ranked_all:
         return InterventionDecision(
             action="stop",
             selected_hypothesis_id=None,
@@ -147,6 +163,19 @@ def select_intervention(
             estimated_net_value=None,
             optimistic_net_value=None,
             reason="no_eligible_certified_hypotheses",
+        )
+    if not ranked:
+        return InterventionDecision(
+            action="stop",
+            selected_hypothesis_id=None,
+            max_optimistic_value=max(item.optimistic_net_value for item in ranked_all),
+            delta_hat=None,
+            confidence_radius=None,
+            cost=None,
+            lambda_cost=resolved_lambda,
+            estimated_net_value=None,
+            optimistic_net_value=None,
+            reason="budget_exhausted",
         )
 
     best = ranked[0]
@@ -174,4 +203,5 @@ def select_intervention(
         estimated_net_value=best.estimated_net_value,
         optimistic_net_value=best.optimistic_net_value,
         reason="positive_optimistic_net_value",
+        cost_breakdown=best.cost_breakdown,
     )

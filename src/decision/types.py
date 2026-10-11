@@ -1,4 +1,4 @@
-"""Serializable types for one-round cost-aware decisions."""
+"""Serializable types for cost-aware decisions."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ class DecisionCandidate:
     lambda_cost: float
     estimated_net_value: float
     optimistic_net_value: float
+    cost_breakdown: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -32,6 +33,7 @@ class InterventionDecision:
     estimated_net_value: float | None
     optimistic_net_value: float | None
     reason: str
+    cost_breakdown: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

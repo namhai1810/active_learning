@@ -47,7 +47,13 @@ def empirical_mean_gain(gains: Sequence[float]) -> float:
 
 
 def gain_confidence_radius(m: int, M: float, K: int, T: int, delta: float) -> float:
-    """Return M*sqrt(2*log(2*K*T/delta)/m), exactly as specified."""
+    """Return the predeclared K-by-T union-adjusted Hoeffding radius.
+
+    Under adaptive rounds this is valid only when the observations used at each
+    selected round satisfy the bounded conditional concentration assumption
+    given the preceding history. The arithmetic alone does not establish that
+    generated data or related training runs are conditionally independent.
+    """
     if isinstance(m, bool) or m <= 0:
         raise ValueError("m must be a positive integer")
     if isinstance(K, bool) or K <= 0 or isinstance(T, bool) or T <= 0:

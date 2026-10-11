@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.data.hans import HANSExample
 from src.data.hans_split import HANS_FIVE_WAY_SPLIT_VERSION
+from src.active_learning.multiround import partition_ids_by_round
 from src.data.pipeline_split import (
     materialize_role,
     records_by_id,
@@ -137,6 +138,15 @@ def main() -> None:
     delta = float(gain.get("delta", 0.05))
     K = int(gain.get("K", 5))
     T = int(gain.get("T", 1))
+    active_learning = config.get("active_learning", {})
+    if not isinstance(active_learning, dict):
+        raise ValueError("active_learning must be a mapping")
+    round_index = int(active_learning.get("current_round", 1))
+    declared_rounds = int(active_learning.get("max_rounds", 1))
+    if not 1 <= round_index <= declared_rounds:
+        raise ValueError("active_learning.current_round is outside max_rounds")
+    if T < declared_rounds:
+        raise ValueError("gain.T must cover active_learning.max_rounds")
     preserve_adapters = bool(pilot.get("preserve_adapters", True))
 
     run_dir = Path(args.run_dir)
@@ -163,7 +173,16 @@ def main() -> None:
     split = reconstruct_five_way_split(source, hans)
     validate_manifest(read_json(required["manifest"]), split)
     indexed = records_by_id(source)
-    gain_eval = materialize_role(indexed, split.gain_eval_ids, "gain_eval")
+    gain_eval_shards = partition_ids_by_round(
+        split.gain_eval_ids,
+        declared_rounds,
+        seed=int(hans["split_seed"]),
+        namespace="adaptive_gain_eval",
+    )
+    round_gain_ids = gain_eval_shards[round_index - 1]
+    if not round_gain_ids:
+        raise ValueError("The configured gain_eval split is too small for max_rounds")
+    gain_eval = materialize_role(indexed, round_gain_ids, "gain_eval")
     hypotheses = _load_hypotheses(read_json(required["hypotheses"]))
     verification = read_json(required["verification"])
     if (
@@ -335,14 +354,20 @@ def main() -> None:
             "certified_hypothesis_ids": certified_ids,
             "pilot_config": asdict(pilot_config),
             "gain_bound": {"M": pilot_config.M, "delta": delta, "K": K, "T": T},
+            "adaptive_round": round_index,
+            "declared_max_rounds": declared_rounds,
+            "gain_eval_round_ids": list(round_gain_ids),
+            "gain_eval_reused_across_rounds": False,
             "starting_checkpoint": checkpoint_before,
             "starting_checkpoint_unchanged": checkpoint_descriptor(model) == checkpoint_before,
             "adapters_preserved": preserve_adapters,
             "data_shortages": shortages,
             "independence_limitation": (
-                "Intervals assume bounded independent pilot gains. Disjoint training "
-                "and evaluation batches reduce reuse but do not establish causal "
-                "independence between related LoRA runs."
+                "The K*T union adjustment supports adaptive round selection only if "
+                "each round's bounded pilot gains are conditionally independent with "
+                "a stable conditional mean given prior history. Gain-eval shards and "
+                "pilot batches are disjoint, but related LoRA runs and generated data "
+                "may still violate that assumption; these are not causal intervals."
             ),
             "estimates": [item.to_dict() for item in estimates],
         },

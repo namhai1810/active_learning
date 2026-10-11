@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Protocol
 
@@ -68,6 +69,7 @@ class HuggingFaceJSONTeacher:
             raise ValueError("Teacher token limits must be positive")
         self._model: Any | None = None
         self._tokenizer: Any | None = None
+        self._usage: dict[str, dict[str, Any]] = {}
 
     def _ensure_loaded(self) -> None:
         if self._model is not None:
@@ -139,6 +141,7 @@ class HuggingFaceJSONTeacher:
         device = self._model.get_input_embeddings().weight.device
         encoded = {name: tensor.to(device) for name, tensor in encoded.items()}
         input_width = encoded["input_ids"].shape[1]
+        started = time.perf_counter()
         with torch.inference_mode():
             generated = self._model.generate(
                 **encoded,
@@ -150,7 +153,32 @@ class HuggingFaceJSONTeacher:
         response = self._tokenizer.decode(
             generated[0, input_width:], skip_special_tokens=True
         )
+        self._usage[call.request_id] = {
+            "input_tokens": int(input_width),
+            "output_tokens": int(generated.shape[1] - input_width),
+            "wall_clock_seconds": time.perf_counter() - started,
+            "provider": "huggingface",
+            "model": self.name_or_path,
+        }
         return _parse_json_object(response)
+
+    def usage_for(self, request_id: str) -> dict[str, Any] | None:
+        """Return measured token/runtime usage for a completed request."""
+        value = self._usage.get(request_id)
+        return None if value is None else dict(value)
+
+
+def teacher_exchange_log(
+    teacher: TeacherLLM, call: TeacherCall, response: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Build a provider-neutral request/response log with measured usage."""
+    getter = getattr(teacher, "usage_for", None)
+    usage = getter(call.request_id) if callable(getter) else None
+    return {
+        "teacher_call": call.to_dict(),
+        "teacher_response": dict(response),
+        "usage": usage,
+    }
 
 
 def build_teacher(config: Mapping[str, Any]) -> TeacherLLM:

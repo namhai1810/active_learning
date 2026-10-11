@@ -6,7 +6,7 @@ verification:
   n_probe_sets: 50
   min_valid_probe_sets: 40
   max_hypotheses_per_round: 5
-  max_rounds: 1
+  max_rounds: 5
   max_context_records: 24
   max_probe_sets_per_call: 8
   near_duplicate_threshold: 0.92

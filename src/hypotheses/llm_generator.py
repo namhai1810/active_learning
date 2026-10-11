@@ -13,7 +13,7 @@ from typing import Any
 from src.data.labels import HANS_LABELS
 from src.hypotheses.error_scorer import ErrorProbabilityScorer, ErrorScoreBatch
 from src.hypotheses.types import FailureHypothesis
-from src.teacher.base import TeacherCall, TeacherLLM
+from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
 
 
 DISCOVERY_PROMPT_VERSION = "failure_discovery_v1"
@@ -401,7 +401,6 @@ class LLMFailureHypothesisGenerator:
         log = {
             "scoring_calls": list(scored.logs),
             "selection": selection_log,
-            "teacher_call": call.to_dict(),
-            "teacher_response": response,
+            **teacher_exchange_log(self.teacher, call, response),
         }
         return hypotheses, evidence, log
