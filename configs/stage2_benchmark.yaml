@@ -9,6 +9,14 @@ stage2_benchmark:
   frozen_manifest_path: outputs/stage2_shared/hans_frozen_manifest.json
   sealed_final_test_path: outputs/stage2_shared/sealed_final_test.jsonl
   near_duplicate_threshold: 0.92
+  # Used only by ours_verified. Counterfactual pairs are separated in label-
+  # distribution space; invariant pairs are regularized toward consistency.
+  ours_training_objective:
+    token_cross_entropy_weight: 1.0
+    contrastive_weight: 1.0
+    consistency_weight: 1.0
+    # Jensen-Shannon divergence is bounded by log(2).
+    contrastive_margin: 0.25
   synthetic_artifacts:
     random_synthetic:
       accepted: outputs/stage2_acquisition/random_synthetic/seed_{seed}/synthetic/accepted.jsonl

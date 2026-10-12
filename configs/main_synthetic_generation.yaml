@@ -6,7 +6,10 @@ synthetic_generation:
   invariant_pairs_per_hypothesis: 80
   reasoning_contrast_pairs_per_hypothesis: 0
   max_seed_examples: 24
-  max_pairs_per_call: 8
+  # Keep each structured JSON response comfortably below the teacher's output
+  # token limit. Larger batches have previously been truncated mid-object.
+  max_pairs_per_call: 4
+  max_attempts_per_batch: 3
   seed: 42
   prompt_version: targeted_synthetic_nli_pairs_v2
 
@@ -14,6 +17,8 @@ synthetic_validation:
   near_duplicate_threshold: 0.92
   min_sentence_tokens: 3
   max_sentence_tokens: 80
-  max_examples_per_call: 24
+  # QC also returns structured JSON; smaller batches reduce truncation risk.
+  max_examples_per_call: 8
+  max_attempts_per_batch: 3
   seed: 42
   prompt_version: synthetic_pair_quality_control_v2

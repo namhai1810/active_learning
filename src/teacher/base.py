@@ -12,7 +12,11 @@ import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Mapping, Protocol
+
+from src.utils.artifacts import read_json
+from src.utils.io import write_json
 
 
 @dataclass(frozen=True)
@@ -168,6 +172,54 @@ class HuggingFaceJSONTeacher:
         return None if value is None else dict(value)
 
 
+class PersistentJSONTeacherCache:
+    """Persist successful deterministic teacher calls for safe run resumption."""
+
+    def __init__(self, teacher: TeacherLLM, cache_dir: str | Path) -> None:
+        self.teacher = teacher
+        self.cache_dir = Path(cache_dir)
+        self._usage: dict[str, dict[str, Any] | None] = {}
+
+    def generate_json(self, call: TeacherCall) -> dict[str, Any]:
+        path = self.cache_dir / f"{call.request_id}.json"
+        if path.is_file():
+            cached = read_json(path)
+            if cached.get("request_id") != call.request_id:
+                raise ValueError(f"Teacher cache request ID mismatch: {path}")
+            response = cached.get("response")
+            if not isinstance(response, dict):
+                raise ValueError(f"Teacher cache response is not an object: {path}")
+            usage = cached.get("usage")
+            if usage is not None and not isinstance(usage, dict):
+                raise ValueError(f"Teacher cache usage is invalid: {path}")
+            self._usage[call.request_id] = (
+                None if usage is None else dict(usage)
+            )
+            return dict(response)
+
+        response = self.teacher.generate_json(call)
+        getter = getattr(self.teacher, "usage_for", None)
+        usage = getter(call.request_id) if callable(getter) else None
+        self._usage[call.request_id] = None if usage is None else dict(usage)
+        write_json(
+            path,
+            {
+                "request_id": call.request_id,
+                "response": response,
+                "usage": usage,
+            },
+        )
+        return response
+
+    def usage_for(self, request_id: str) -> dict[str, Any] | None:
+        if request_id in self._usage:
+            usage = self._usage[request_id]
+            return None if usage is None else dict(usage)
+        getter = getattr(self.teacher, "usage_for", None)
+        usage = getter(request_id) if callable(getter) else None
+        return None if usage is None else dict(usage)
+
+
 def teacher_exchange_log(
     teacher: TeacherLLM, call: TeacherCall, response: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -178,6 +230,23 @@ def teacher_exchange_log(
         "teacher_call": call.to_dict(),
         "teacher_response": dict(response),
         "usage": usage,
+    }
+
+
+def teacher_failure_log(
+    teacher: TeacherLLM,
+    call: TeacherCall,
+    error: Exception,
+    response: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Record a billed teacher attempt rejected by parsing or schema validation."""
+    getter = getattr(teacher, "usage_for", None)
+    usage = getter(call.request_id) if callable(getter) else None
+    return {
+        "teacher_call": call.to_dict(),
+        "teacher_response": None if response is None else dict(response),
+        "usage": usage,
+        "validation_error": str(error),
     }
 
 

@@ -476,8 +476,10 @@ def main() -> None:
         f"Frozen HANS manifest: `{next(iter(hashes))}`",
         "",
         "Random/Uncertainty are MNLI cross-source baselines; equal data access with "
-        "HANS-guided synthetic methods is not claimed. Synthetic pair structure is "
-        "used for selection only; training uses per-example cross-entropy.",
+        "HANS-guided synthetic methods is not claimed. Random-synthetic and the "
+        "no-verification ablation use pairs for selection but train with per-example "
+        "cross-entropy. Ours uses token cross-entropy plus counterfactual contrastive "
+        "and invariant consistency losses.",
         "",
         "![Experiment A final HANS accuracy](figures/experiment_a_final_hans_accuracy.svg)",
         "",

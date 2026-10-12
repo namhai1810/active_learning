@@ -28,7 +28,12 @@ from src.decision.cost_model import CostUsage, compute_cost, cost_rates_from_con
 from src.evaluation.hans import evaluate_hans
 from src.evaluation.mnli import evaluate_mnli
 from src.intervention.pilot import _start_gpu_timer, _stop_gpu_timer
-from src.models.lora_training import LoraTrainingConfig, train_lora
+from src.models.lora_training import (
+    LoraTrainingConfig,
+    PairwiseLossConfig,
+    train_lora,
+    train_paired_lora,
+)
 from src.models.qwen_nli import QwenNLIStudent
 from src.synthetic.types import SyntheticNLIExample
 from src.utils.artifacts import read_json, read_jsonl
@@ -218,6 +223,13 @@ def main() -> None:
     )
     model = require_mapping(config, "model")
     training = LoraTrainingConfig.from_mapping(require_mapping(config, "training"))
+    pairwise_training = (
+        PairwiseLossConfig.from_mapping(
+            require_mapping(benchmark, "ours_training_objective")
+        )
+        if args.method == "ours_verified"
+        else None
+    )
     pool_config = require_mapping(config, "mnli_pool")
     mnli_eval_config = require_mapping(config, "mnli_evaluation")
     batch_size = int(model.get("batch_size", 4))
@@ -319,10 +331,24 @@ def main() -> None:
         round_dir = output / "rounds" / f"round_{round_index:03d}"
         wall_start = time.perf_counter()
         gpu_timer = _start_gpu_timer(student)
-        train_loss = train_lora(
-            student, acquired_mnli, training, round_dir / "adapter",
-            args.seed + round_index - 1,
-        )
+        if args.method == "ours_verified":
+            assert pairwise_training is not None
+            paired_result = train_paired_lora(
+                student,
+                acquired_synthetic,
+                training,
+                pairwise_training,
+                round_dir / "adapter",
+                args.seed + round_index - 1,
+            )
+            train_loss = paired_result.total_loss
+            loss_components: dict[str, Any] | None = asdict(paired_result)
+        else:
+            train_loss = train_lora(
+                student, acquired_mnli, training, round_dir / "adapter",
+                args.seed + round_index - 1,
+            )
+            loss_components = None
         gpu_seconds = _stop_gpu_timer(student, gpu_timer)
         wall_seconds = time.perf_counter() - wall_start
         current_adapter = str(round_dir / "adapter")
@@ -343,6 +369,13 @@ def main() -> None:
                 "starting_checkpoint": starting,
                 "ending_checkpoint": ending,
                 "train_loss": train_loss,
+                "loss_components": loss_components,
+                "training_objective": (
+                    "token_cross_entropy_plus_counterfactual_contrastive_"
+                    "plus_invariant_consistency"
+                    if args.method == "ours_verified"
+                    else "per_example_causal_lm_cross_entropy"
+                ),
                 "optimizer_steps": _optimizer_steps(actual, training),
                 "acquisition_scored_examples": acquisition_scored_examples,
                 "acquisition_gpu_seconds": acquisition_gpu_seconds,
@@ -546,10 +579,23 @@ def main() -> None:
         "rounds": args.rounds,
         "cross_source_baseline": args.method in {"random_mnli", "uncertainty_mnli"},
         "equal_data_access_claimed": False,
-        "training_objective": "per_example_causal_lm_cross_entropy",
-        "pair_structure_used_only_for_selection": args.method not in {
-            "zero_shot", "random_mnli", "uncertainty_mnli"
+        "training_objective": (
+            "none"
+            if args.method == "zero_shot"
+            else (
+                "token_cross_entropy_plus_counterfactual_contrastive_"
+                "plus_invariant_consistency"
+                if args.method == "ours_verified"
+                else "per_example_causal_lm_cross_entropy"
+            )
+        ),
+        "pair_structure_used_for_training": args.method == "ours_verified",
+        "pair_structure_used_only_for_selection": args.method in {
+            "random_synthetic", "failure_driven_no_verification"
         },
+        "pairwise_loss_config": (
+            asdict(pairwise_training) if pairwise_training is not None else None
+        ),
         "manifest_hash": manifest.manifest_hash,
         "git_commit": _git_commit(),
         "initial_checkpoint": initial_checkpoint,

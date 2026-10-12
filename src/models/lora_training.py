@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from src.data.mnli import MNLIExample
+from src.data.labels import MNLI_LABELS
 from src.models.qwen_nli import QwenNLIStudent
+from src.synthetic.types import SYNTHETIC_PAIR_MEMBERS, SyntheticNLIExample
 
 
 @dataclass(frozen=True)
@@ -68,18 +70,128 @@ class LoraTrainingConfig:
         return config
 
 
-def train_lora(
+@dataclass(frozen=True)
+class PairwiseLossConfig:
+    token_cross_entropy_weight: float = 1.0
+    contrastive_weight: float = 1.0
+    consistency_weight: float = 1.0
+    contrastive_margin: float = 0.25
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "PairwiseLossConfig":
+        config = cls(
+            token_cross_entropy_weight=float(
+                value.get("token_cross_entropy_weight", 1.0)
+            ),
+            contrastive_weight=float(value.get("contrastive_weight", 1.0)),
+            consistency_weight=float(value.get("consistency_weight", 1.0)),
+            contrastive_margin=float(value.get("contrastive_margin", 0.25)),
+        )
+        if config.token_cross_entropy_weight <= 0:
+            raise ValueError("token_cross_entropy_weight must be positive")
+        if config.contrastive_weight <= 0 or config.consistency_weight <= 0:
+            raise ValueError("Pairwise loss weights must be positive")
+        if not 0.0 < config.contrastive_margin < 0.6931471805599453:
+            raise ValueError("contrastive_margin must be in (0, log(2))")
+        return config
+
+
+@dataclass(frozen=True)
+class PairedTrainingResult:
+    total_loss: float
+    token_cross_entropy_loss: float
+    contrastive_loss: float
+    consistency_loss: float
+    counterfactual_pairs: int
+    invariant_pairs: int
+    reasoning_contrast_pairs: int
+
+
+def pairwise_distribution_losses(
+    probabilities: Any,
+    pair_types: list[str],
+    gold_labels: list[str],
+    contrastive_margin: float,
+) -> tuple[Any, Any]:
+    """Return contrastive and consistency losses for adjacent pair members."""
+    import torch
+
+    if probabilities.ndim != 2 or probabilities.shape[1] != len(MNLI_LABELS):
+        raise ValueError("Pairwise probabilities must have shape [examples, 3]")
+    if probabilities.shape[0] != 2 * len(pair_types):
+        raise ValueError("Pairwise probabilities must contain two rows per pair")
+    if len(gold_labels) != probabilities.shape[0]:
+        raise ValueError("Pairwise gold-label count is inconsistent")
+    if any(pair_type not in SYNTHETIC_PAIR_MEMBERS for pair_type in pair_types):
+        raise ValueError("Pairwise loss received an unknown pair type")
+    left = probabilities[0::2]
+    right = probabilities[1::2]
+    midpoint = 0.5 * (left + right)
+    left_log = left.clamp_min(1e-12).log()
+    right_log = right.clamp_min(1e-12).log()
+    log_midpoint = midpoint.clamp_min(1e-12).log()
+    js_divergence = 0.5 * (
+        (left * (left_log - log_midpoint)).sum(dim=-1)
+        + (right * (right_log - log_midpoint)).sum(dim=-1)
+    )
+    contrastive_indices = []
+    consistency_indices = []
+    for pair_index, pair_type in enumerate(pair_types):
+        labels_differ = (
+            gold_labels[2 * pair_index] != gold_labels[2 * pair_index + 1]
+        )
+        if pair_type == "counterfactual" or (
+            pair_type == "reasoning_contrast" and labels_differ
+        ):
+            contrastive_indices.append(pair_index)
+        else:
+            consistency_indices.append(pair_index)
+    zero = probabilities.sum() * 0.0
+    contrastive_loss = zero
+    consistency_loss = zero
+    if contrastive_indices:
+        selected = js_divergence[
+            torch.tensor(
+                contrastive_indices,
+                dtype=torch.long,
+                device=js_divergence.device,
+            )
+        ]
+        contrastive_loss = torch.relu(contrastive_margin - selected).mean()
+    if consistency_indices:
+        consistency_loss = js_divergence[
+            torch.tensor(
+                consistency_indices,
+                dtype=torch.long,
+                device=js_divergence.device,
+            )
+        ].mean()
+    return contrastive_loss, consistency_loss
+
+
+def _train_lora(
     student: QwenNLIStudent,
     examples: list[MNLIExample],
     config: LoraTrainingConfig,
     adapter_output_dir: str | Path,
     seed: int,
-) -> float:
+    *,
+    pair_types: list[str] | None = None,
+    pairwise_config: PairwiseLossConfig | None = None,
+) -> PairedTrainingResult:
     """Fine-tune only LoRA parameters and save the resulting adapter."""
     if not examples:
         raise ValueError("LoRA training requires at least one acquired example")
     if any(example.label is None for example in examples):
         raise ValueError("All acquired MNLI examples must have labels")
+    paired = pairwise_config is not None
+    if paired:
+        if pair_types is None or len(pair_types) * 2 != len(examples):
+            raise ValueError("Paired training requires one type per complete pair")
+        if config.batch_size < 2 or config.batch_size % 2:
+            raise ValueError("Paired training batch_size must be positive and even")
+    elif pair_types is not None:
+        raise ValueError("pair_types require a pairwise loss configuration")
 
     import torch
     from peft import LoraConfig, PeftModel, TaskType, get_peft_model
@@ -118,12 +230,40 @@ def train_lora(
             str(example.label),
             max_length=config.max_length,
         )
-        encoded.append((example.id, input_ids, labels))
+        try:
+            label_start = next(
+                index for index, token_label in enumerate(labels) if token_label != -100
+            )
+        except StopIteration as exc:
+            raise RuntimeError(f"Training example {example.id!r} has no label tokens") from exc
+        encoded.append(
+            {
+                "id": example.id,
+                "input_ids": input_ids,
+                "labels": labels,
+                "label": str(example.label),
+                "label_start": label_start,
+            }
+        )
+
+    if paired:
+        encoded_units = []
+        assert pair_types is not None
+        for pair_index, index in enumerate(range(0, len(encoded), 2)):
+            unit = encoded[index : index + 2]
+            for row in unit:
+                row["pair_type"] = pair_types[pair_index]
+            encoded_units.append(unit)
+        unit_batch_size = config.batch_size // 2
+    else:
+        encoded_units = [[row] for row in encoded]
+        unit_batch_size = config.batch_size
 
     def collate(
-        rows: list[tuple[str, list[int], list[int]]]
+        units: list[list[dict[str, Any]]]
     ) -> dict[str, Any]:
-        width = max(len(input_ids) for _, input_ids, _ in rows)
+        rows = [row for unit in units for row in unit]
+        width = max(len(row["input_ids"]) for row in rows)
         input_batch = torch.full(
             (len(rows), width),
             student.tokenizer.pad_token_id,
@@ -133,13 +273,22 @@ def train_lora(
             (len(rows), width), -100, dtype=torch.long
         )
         attention_mask = torch.zeros((len(rows), width), dtype=torch.long)
-        for row_index, (_, input_ids, labels) in enumerate(rows):
+        for row_index, row in enumerate(rows):
+            input_ids = row["input_ids"]
+            labels = row["labels"]
             length = len(input_ids)
             input_batch[row_index, :length] = torch.tensor(input_ids)
             label_batch[row_index, :length] = torch.tensor(labels)
             attention_mask[row_index, :length] = 1
         return {
-            "example_ids": [example_id for example_id, _, _ in rows],
+            "example_ids": [str(row["id"]) for row in rows],
+            "gold_labels": [str(row["label"]) for row in rows],
+            "pair_types": (
+                [str(unit[0]["pair_type"]) for unit in units] if paired else None
+            ),
+            "label_starts": torch.tensor(
+                [int(row["label_start"]) for row in rows], dtype=torch.long
+            ),
             "input_ids": input_batch,
             "labels": label_batch,
             "attention_mask": attention_mask,
@@ -148,8 +297,8 @@ def train_lora(
     generator = torch.Generator()
     generator.manual_seed(seed)
     data_loader = DataLoader(
-        encoded,
-        batch_size=config.batch_size,
+        encoded_units,
+        batch_size=unit_batch_size,
         shuffle=True,
         collate_fn=collate,
         generator=generator,
@@ -159,6 +308,20 @@ def train_lora(
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
+    label_first_token_ids: list[int] | None = None
+    if paired:
+        label_first_token_ids = []
+        for label in MNLI_LABELS:
+            token_ids = student.tokenizer.encode(
+                " " + label, add_special_tokens=False
+            )
+            if not token_ids:
+                raise RuntimeError(f"Tokenizer produced no tokens for label {label!r}")
+            label_first_token_ids.append(int(token_ids[0]))
+        if len(set(label_first_token_ids)) != len(MNLI_LABELS):
+            raise RuntimeError(
+                "Pairwise label distributions require distinct first tokens for labels"
+            )
 
     original_use_cache = getattr(student.model.config, "use_cache", None)
     if config.gradient_checkpointing:
@@ -179,6 +342,11 @@ def train_lora(
     accumulated_batches = 0
     total_loss = 0.0
     loss_count = 0
+    token_loss_total = 0.0
+    contrastive_loss_total = 0.0
+    contrastive_loss_count = 0
+    consistency_loss_total = 0.0
+    consistency_loss_count = 0
     for epoch_index in range(config.num_epochs):
         num_batches = len(data_loader)
         batches = tqdm(
@@ -191,20 +359,68 @@ def train_lora(
         )
         for batch_index, batch in enumerate(batches):
             example_ids = batch.pop("example_ids")
+            gold_labels = batch.pop("gold_labels")
+            batch_pair_types = batch.pop("pair_types")
             batch = {
                 key: tensor.to(student.input_device)
                 for key, tensor in batch.items()
             }
             labels = batch.pop("labels")
+            label_starts = batch.pop("label_starts")
             logits = student.model(**batch, use_cache=False).logits
             shifted_logits = logits[:, :-1, :].contiguous().float()
             shifted_labels = labels[:, 1:].contiguous()
             active = shifted_labels != -100
             if not active.any():
                 raise RuntimeError("Training batch contains no target tokens")
-            loss = torch.nn.functional.cross_entropy(
+            token_loss = torch.nn.functional.cross_entropy(
                 shifted_logits[active], shifted_labels[active]
             )
+            contrastive_loss = token_loss * 0.0
+            consistency_loss = token_loss * 0.0
+            if paired:
+                assert pairwise_config is not None
+                assert label_first_token_ids is not None
+                assert batch_pair_types is not None
+                row_indices = torch.arange(
+                    logits.shape[0], device=logits.device
+                )
+                first_label_logits = logits[
+                    row_indices, label_starts.to(logits.device) - 1
+                ].float()
+                class_token_ids = torch.tensor(
+                    label_first_token_ids, dtype=torch.long, device=logits.device
+                )
+                class_logits = first_label_logits.index_select(1, class_token_ids)
+                probabilities = torch.softmax(class_logits, dim=-1)
+                contrastive_loss, consistency_loss = pairwise_distribution_losses(
+                    probabilities,
+                    batch_pair_types,
+                    gold_labels,
+                    pairwise_config.contrastive_margin,
+                )
+                contrastive_pair_count = sum(
+                    pair_type == "counterfactual"
+                    or (
+                        pair_type == "reasoning_contrast"
+                        and gold_labels[2 * pair_index]
+                        != gold_labels[2 * pair_index + 1]
+                    )
+                    for pair_index, pair_type in enumerate(batch_pair_types)
+                )
+                if contrastive_pair_count:
+                    contrastive_loss_total += contrastive_loss.detach().float().item()
+                    contrastive_loss_count += 1
+                if contrastive_pair_count < len(batch_pair_types):
+                    consistency_loss_total += consistency_loss.detach().float().item()
+                    consistency_loss_count += 1
+                loss = (
+                    pairwise_config.token_cross_entropy_weight * token_loss
+                    + pairwise_config.contrastive_weight * contrastive_loss
+                    + pairwise_config.consistency_weight * consistency_loss
+                )
+            else:
+                loss = token_loss
             if not torch.isfinite(loss):
                 raise RuntimeError(
                     "Non-finite training loss "
@@ -212,8 +428,13 @@ def train_lora(
                     f"example_ids={example_ids}: {loss.item()}"
                 )
             total_loss += loss.detach().float().item()
+            token_loss_total += token_loss.detach().float().item()
             loss_count += 1
-            batches.set_postfix(loss=f"{loss.detach().float().item():.4f}", refresh=False)
+            batches.set_postfix(
+                loss=f"{loss.detach().float().item():.4f}",
+                ce=f"{token_loss.detach().float().item():.4f}",
+                refresh=False,
+            )
             gradients = torch.autograd.grad(
                 loss,
                 trainable_parameters,
@@ -276,4 +497,91 @@ def train_lora(
     output_path = Path(adapter_output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     student.model.save_pretrained(output_path)
-    return total_loss / loss_count
+    return PairedTrainingResult(
+        total_loss=total_loss / loss_count,
+        token_cross_entropy_loss=token_loss_total / loss_count,
+        contrastive_loss=(
+            contrastive_loss_total / contrastive_loss_count
+            if contrastive_loss_count
+            else 0.0
+        ),
+        consistency_loss=(
+            consistency_loss_total / consistency_loss_count
+            if consistency_loss_count
+            else 0.0
+        ),
+        counterfactual_pairs=(
+            pair_types.count("counterfactual") if pair_types is not None else 0
+        ),
+        invariant_pairs=(
+            pair_types.count("invariant") if pair_types is not None else 0
+        ),
+        reasoning_contrast_pairs=(
+            pair_types.count("reasoning_contrast") if pair_types is not None else 0
+        ),
+    )
+
+
+def train_lora(
+    student: QwenNLIStudent,
+    examples: list[MNLIExample],
+    config: LoraTrainingConfig,
+    adapter_output_dir: str | Path,
+    seed: int,
+) -> float:
+    """Fine-tune with the shared per-example token cross-entropy objective."""
+    return _train_lora(
+        student, examples, config, adapter_output_dir, seed
+    ).total_loss
+
+
+def train_paired_lora(
+    student: QwenNLIStudent,
+    examples: list[SyntheticNLIExample],
+    config: LoraTrainingConfig,
+    pairwise_config: PairwiseLossConfig,
+    adapter_output_dir: str | Path,
+    seed: int,
+) -> PairedTrainingResult:
+    """Fine-tune on complete synthetic pairs with CE and pairwise objectives."""
+    if not examples:
+        raise ValueError("Paired LoRA training requires synthetic examples")
+    grouped: dict[str, list[SyntheticNLIExample]] = {}
+    seen_ids: set[str] = set()
+    for example in examples:
+        if example.id in seen_ids:
+            raise ValueError(f"Duplicate paired training ID: {example.id}")
+        seen_ids.add(example.id)
+        grouped.setdefault(example.pair_id, []).append(example)
+
+    ordered: list[SyntheticNLIExample] = []
+    pair_types: list[str] = []
+    for pair_id, members in grouped.items():
+        if len(members) != 2:
+            raise ValueError(f"Paired training pair {pair_id!r} is incomplete")
+        pair_type = members[0].pair_type
+        if pair_type not in SYNTHETIC_PAIR_MEMBERS or any(
+            member.pair_type != pair_type for member in members
+        ):
+            raise ValueError(f"Paired training pair {pair_id!r} has invalid type")
+        expected_roles = SYNTHETIC_PAIR_MEMBERS[pair_type]
+        if {member.pair_member for member in members} != set(expected_roles):
+            raise ValueError(f"Paired training pair {pair_id!r} has invalid roles")
+        members.sort(key=lambda member: expected_roles.index(member.pair_member))
+        labels = {member.label for member in members}
+        if pair_type == "counterfactual" and len(labels) != 2:
+            raise ValueError("Counterfactual training pairs must change labels")
+        if pair_type == "invariant" and len(labels) != 1:
+            raise ValueError("Invariant training pairs must preserve labels")
+        ordered.extend(members)
+        pair_types.append(pair_type)
+
+    return _train_lora(
+        student,
+        [item.to_mnli() for item in ordered],
+        config,
+        adapter_output_dir,
+        seed,
+        pair_types=pair_types,
+        pairwise_config=pairwise_config,
+    )

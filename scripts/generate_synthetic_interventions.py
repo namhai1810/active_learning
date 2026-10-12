@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -28,7 +29,7 @@ from src.synthetic.validator import (
     TeacherSyntheticQualityJudge,
     validate_synthetic_examples,
 )
-from src.teacher import build_teacher
+from src.teacher import PersistentJSONTeacherCache, build_teacher
 from src.utils.artifacts import read_json, read_jsonl
 from src.utils.config import load_yaml_with_extends, require_mapping
 from src.utils.io import write_json, write_jsonl
@@ -101,7 +102,11 @@ def main() -> None:
     }
     if stage2_policy not in allowed_policies:
         raise ValueError(f"Unsupported stage2_policy: {stage2_policy}")
-    teacher = build_teacher(teacher_config)
+    run_dir = Path(args.run_dir)
+    teacher = PersistentJSONTeacherCache(
+        build_teacher(teacher_config),
+        run_dir / "teacher_calls" / "response_cache",
+    )
     generation_config = SyntheticGenerationConfig(
         counterfactual_pairs_per_hypothesis=int(
             generation["counterfactual_pairs_per_hypothesis"]
@@ -114,6 +119,7 @@ def main() -> None:
         ),
         max_seed_examples=int(generation.get("max_seed_examples", 24)),
         max_pairs_per_call=int(generation.get("max_pairs_per_call", 8)),
+        max_attempts_per_batch=int(generation.get("max_attempts_per_batch", 3)),
         seed=int(generation.get("seed", 42)),
         prompt_version=str(
             generation.get("prompt_version", "targeted_synthetic_nli_pairs_v2")
@@ -133,9 +139,9 @@ def main() -> None:
             validation.get("prompt_version", "synthetic_pair_quality_control_v2")
         ),
         max_examples_per_call=int(validation.get("max_examples_per_call", 24)),
+        max_attempts_per_batch=int(validation.get("max_attempts_per_batch", 3)),
     )
 
-    run_dir = Path(args.run_dir)
     required = {
         "predictions": run_dir / "predictions.jsonl",
         "manifest": run_dir / "hans_split_v2.json",
@@ -158,12 +164,22 @@ def main() -> None:
         output_dir / "manifest.json",
         run_dir / "teacher_calls" / "synthetic.jsonl",
     ]
+    checkpoint_dir = output_dir / "checkpoints"
     existing = [path for path in output_paths if path.exists()]
     if existing and not args.overwrite:
-        raise FileExistsError(
-            "Refusing to overwrite synthetic artifacts: "
-            + ", ".join(str(path) for path in existing)
+        interrupted_final_write = (
+            checkpoint_dir.is_dir() and len(existing) < len(output_paths)
         )
+        if interrupted_final_write:
+            print(
+                "Resuming an interrupted final artifact write from batch checkpoints",
+                flush=True,
+            )
+        else:
+            raise FileExistsError(
+                "Refusing to overwrite synthetic artifacts: "
+                + ", ".join(str(path) for path in existing)
+            )
 
     source = read_jsonl(required["predictions"])
     split = reconstruct_five_way_split(source, hans)
@@ -249,8 +265,33 @@ def main() -> None:
             current_generation_config,
             failure_targeted=stage2_policy != "random_non_failure_targeted",
         )
-        generated, generation_log = generator.generate(hypothesis, intervention)
-        quality, quality_log = quality_judge.judge(hypothesis, generated)
+        checkpoint_key = hashlib.sha256(hypothesis.id.encode("utf-8")).hexdigest()[:16]
+        generation_checkpoint = checkpoint_dir / f"{checkpoint_key}.generation.json"
+        quality_checkpoint = checkpoint_dir / f"{checkpoint_key}.quality.json"
+        generation_resume = (
+            read_json(generation_checkpoint)
+            if generation_checkpoint.is_file()
+            else None
+        )
+        generated, generation_log = generator.generate(
+            hypothesis,
+            intervention,
+            resume_state=generation_resume,
+            checkpoint_callback=lambda state, path=generation_checkpoint: write_json(
+                path, state
+            ),
+        )
+        quality_resume = (
+            read_json(quality_checkpoint) if quality_checkpoint.is_file() else None
+        )
+        quality, quality_log = quality_judge.judge(
+            hypothesis,
+            generated,
+            resume_state=quality_resume,
+            checkpoint_callback=lambda state, path=quality_checkpoint: write_json(
+                path, state
+            ),
+        )
         duplicate_quality_ids = set(quality_all) & set(quality)
         if duplicate_quality_ids:
             raise ValueError(
@@ -341,6 +382,7 @@ def main() -> None:
                 "total_examples_per_hypothesis": generation_config.total_examples,
                 "max_seed_examples": generation_config.max_seed_examples,
                 "max_pairs_per_call": generation_config.max_pairs_per_call,
+                "max_attempts_per_batch": generation_config.max_attempts_per_batch,
                 "seed": generation_config.seed,
                 "prompt_version": generation_config.prompt_version,
             },
@@ -350,6 +392,7 @@ def main() -> None:
                 "max_sentence_tokens": validation_config.max_sentence_tokens,
                 "quality_prompt_version": quality_judge.prompt_version,
                 "quality_max_examples_per_call": quality_judge.max_examples_per_call,
+                "quality_max_attempts_per_batch": quality_judge.max_attempts_per_batch,
             },
             "source_role": "intervention_pool",
             "training_label_space": ["entailment", "neutral", "contradiction"],
@@ -359,6 +402,12 @@ def main() -> None:
                 "selection_unit": "complete_pair",
             },
             "heldout_text_exposed_to_teacher": False,
+            "batch_checkpointing": {
+                "enabled": True,
+                "directory": "synthetic/checkpoints",
+                "atomic_writes": True,
+                "generation_and_quality_control": True,
+            },
             "final_test_materialized": False,
             "leakage_reference_roles": [
                 "intervention_pool",

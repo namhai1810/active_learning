@@ -19,7 +19,9 @@ teacher:
   trust_remote_code: false
   local_files_only: false
   max_input_tokens: 8192
-  max_new_tokens: 2048
+  # Structured synthetic batches can exceed 2K tokens; leave enough room for
+  # the model to close the JSON object instead of truncating it mid-string.
+  max_new_tokens: 4096
 
 model:
   name_or_path: Qwen/Qwen3-1.7B

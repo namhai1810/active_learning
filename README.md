@@ -366,9 +366,13 @@ final checkpoint, so no intermediate final-test metric can influence acquisition
   each checkpoint update.
 - MNLI baselines are labeled cross-source; equal data access with HANS-guided
   methods is not claimed.
-- All trained methods share the same per-example causal-LM cross-entropy recipe.
-  Pair structure controls selection only; no contrastive/consistency loss is
-  claimed.
+- All trained methods share the same LoRA architecture, optimizer settings, and
+  supervised token cross-entropy term. `ours_verified` additionally uses the
+  complete-pair structure during training: counterfactual pairs receive a
+  contrastive Jensen-Shannon margin loss and invariant pairs receive a
+  Jensen-Shannon consistency loss. Random-synthetic and no-verification retain
+  per-example cross-entropy so this objective difference is explicit in every
+  round artifact and final result.
 - Synthetic labels must be explicit entailment/neutral/contradiction labels; no
   binary HANS non-entailment conversion is permitted.
 - Fixed-budget acquisition is reported separately from cost-aware stopping.
