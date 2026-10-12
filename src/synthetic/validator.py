@@ -11,6 +11,7 @@ from typing import Any
 from src.hypotheses.types import FailureHypothesis
 from src.synthetic.types import SYNTHETIC_PAIR_MEMBERS, SyntheticNLIExample
 from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
+from tqdm.auto import tqdm
 
 
 QUALITY_PROMPT_VERSION = "synthetic_pair_quality_control_v2"
@@ -178,9 +179,14 @@ class TeacherSyntheticQualityJudge:
         grouped = _group_complete_pairs(examples)
         pair_ids = sorted(grouped)
         pairs_per_call = max(1, self.max_examples_per_call // 2)
-        for batch_index, start in enumerate(
-            range(0, len(pair_ids), pairs_per_call)
-        ):
+        batch_starts = range(0, len(pair_ids), pairs_per_call)
+        for batch_index, start in enumerate(tqdm(
+            batch_starts,
+            desc=f"synthetic QC [{hypothesis.id[:16]}]",
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=1.0,
+        )):
             batch_pair_ids = pair_ids[start : start + pairs_per_call]
             batch = [item for pair_id in batch_pair_ids for item in grouped[pair_id]]
             payload = {

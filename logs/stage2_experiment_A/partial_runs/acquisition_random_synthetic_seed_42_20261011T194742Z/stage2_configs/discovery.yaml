@@ -1,0 +1,68 @@
+mode: llm_main
+oracle_debug: false
+hans:
+  name: hans
+  data_file: https://raw.githubusercontent.com/tommccoy1/hans/7299f6f657089ce06a0f98e7e81f8d0f5b7741ce/heuristics_evaluation_set.txt
+  split: validation
+  cache_dir: null
+  max_examples: null
+  discovery_fraction: 0.125
+  verification_fraction: 0.125
+  intervention_fraction: 0.125
+  gain_eval_fraction: 0.125
+  split_seed: 20261011
+teacher:
+  provider: huggingface
+  name_or_path: Qwen/Qwen3-14B
+  device_map: auto
+  dtype: bfloat16
+  trust_remote_code: false
+  local_files_only: false
+  max_input_tokens: 8192
+  max_new_tokens: 2048
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  adapter_path: null
+  device_map: cuda:0
+  dtype: float32
+  trust_remote_code: false
+  local_files_only: false
+  max_length: 512
+  batch_size: 16
+training:
+  num_epochs: 1
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-05
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  max_length: 512
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  gradient_checkpointing: false
+hypothesis_generation:
+  max_hypotheses: 5
+  max_error_examples: 80
+  max_contrast_examples: 20
+  sampling_strategy: exponential
+  sampling_alpha: 0.5
+  sampling_beta: 10.0
+  sampling_threshold: 0.7
+  contrast_sampling_strategy: highest_error_score
+  seed: 42
+  prompt_version: failure_discovery_v1
+  error_scorer:
+    type: teacher_llm
+    source: teacher_llm_critic
+    max_records_per_call: 40
+    seed: 42
+    prompt_version: discovery_error_probability_v1

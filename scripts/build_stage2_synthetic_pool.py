@@ -65,7 +65,8 @@ def _write_yaml(path: Path, value: dict[str, Any]) -> None:
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
 
-def _run(script: str, config: Path, run_dir: Path) -> None:
+def _run(script: str, config: Path, run_dir: Path, *, stage: str) -> None:
+    print(f"  [STAGE] {stage}", flush=True)
     subprocess.run(
         [sys.executable, str(PROJECT_ROOT / "scripts" / script), "--config", str(config), "--run-dir", str(run_dir)],
         cwd=PROJECT_ROOT,
@@ -137,10 +138,19 @@ def main() -> None:
             manifest_payload(split, hans, mode="llm_main"),
         )
     else:
-        _run("build_hypotheses.py", discovery_path, run_dir)
+        _run(
+            "build_hypotheses.py", discovery_path, run_dir,
+            stage="discovering failure hypotheses",
+        )
         if args.method == "ours_verified":
-            _run("verify_hypotheses.py", verification_path, run_dir)
-    _run("generate_synthetic_interventions.py", generation_path, run_dir)
+            _run(
+                "verify_hypotheses.py", verification_path, run_dir,
+                stage="generating and verifying controlled probes",
+            )
+    _run(
+        "generate_synthetic_interventions.py", generation_path, run_dir,
+        stage="generating and quality-checking synthetic training data",
+    )
     print(f"Wrote Stage 2 acquisition pool to {run_dir}")
 
 

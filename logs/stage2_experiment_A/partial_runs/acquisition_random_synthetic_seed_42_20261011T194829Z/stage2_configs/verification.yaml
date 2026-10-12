@@ -1,0 +1,66 @@
+mode: llm_main
+oracle_debug: false
+hans:
+  name: hans
+  data_file: https://raw.githubusercontent.com/tommccoy1/hans/7299f6f657089ce06a0f98e7e81f8d0f5b7741ce/heuristics_evaluation_set.txt
+  split: validation
+  cache_dir: null
+  max_examples: null
+  discovery_fraction: 0.125
+  verification_fraction: 0.125
+  intervention_fraction: 0.125
+  gain_eval_fraction: 0.125
+  split_seed: 20261011
+teacher:
+  provider: huggingface
+  name_or_path: Qwen/Qwen3-14B
+  device_map: auto
+  dtype: bfloat16
+  trust_remote_code: false
+  local_files_only: false
+  max_input_tokens: 8192
+  max_new_tokens: 2048
+model:
+  name_or_path: Qwen/Qwen3-1.7B
+  adapter_path: null
+  device_map: cuda:0
+  dtype: float32
+  trust_remote_code: false
+  local_files_only: false
+  max_length: 512
+  batch_size: 16
+training:
+  num_epochs: 1
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-05
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  max_length: 512
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  gradient_checkpointing: false
+verification:
+  delta: 0.05
+  tau_v: 0.5
+  n_probe_sets: 50
+  min_valid_probe_sets: 40
+  max_hypotheses_per_round: 5
+  max_rounds: 5
+  max_context_records: 24
+  max_probe_sets_per_call: 8
+  near_duplicate_threshold: 0.92
+  validation_max_probe_sets_per_call: 8
+  seed: 42
+  label_validation_seed: 100042
+  probe_prompt_version: controlled_verification_probes_v1
+  label_validation_prompt_version: verification_probe_validation_v1

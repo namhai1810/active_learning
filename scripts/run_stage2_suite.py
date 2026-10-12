@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -40,27 +41,48 @@ def main() -> None:
         budgets = [128]
         rounds, per_round = 4, 32
     root = Path(args.output_root).resolve() / f"experiment_{args.experiment.lower()}"
-    for method in methods:
-        for budget in budgets:
-            for seed in seeds:
-                output = root / method / f"budget_{budget}" / f"seed_{seed}"
-                if (output / "result.json").is_file():
-                    print(f"skip completed: {output}")
-                    continue
-                command = [
-                    sys.executable,
-                    str(PROJECT_ROOT / "scripts" / "run_stage2_benchmark.py"),
-                    "--config", args.config,
-                    "--experiment", args.experiment,
-                    "--method", method,
-                    "--seed", str(seed),
-                    "--budget", str(budget),
-                    "--rounds", str(rounds),
-                    "--output-dir", str(output),
-                ]
-                if per_round is not None:
-                    command.extend(["--per-round-budget", str(per_round)])
-                subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    jobs = [
+        (method, budget, seed)
+        for method in methods
+        for budget in budgets
+        for seed in seeds
+    ]
+    suite_started = time.monotonic()
+    for index, (method, budget, seed) in enumerate(jobs, start=1):
+        output = root / method / f"budget_{budget}" / f"seed_{seed}"
+        label = (
+            f"method={method} budget={budget} seed={seed}"
+        )
+        if (output / "result.json").is_file():
+            print(f"[RUN {index}/{len(jobs)}][SKIP] {label}", flush=True)
+            continue
+        print(f"[RUN {index}/{len(jobs)}][START] {label}", flush=True)
+        started = time.monotonic()
+        command = [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "run_stage2_benchmark.py"),
+            "--config", args.config,
+            "--experiment", args.experiment,
+            "--method", method,
+            "--seed", str(seed),
+            "--budget", str(budget),
+            "--rounds", str(rounds),
+            "--output-dir", str(output),
+        ]
+        if per_round is not None:
+            command.extend(["--per-round-budget", str(per_round)])
+        subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+        elapsed = time.monotonic() - started
+        print(
+            f"[RUN {index}/{len(jobs)}][DONE] {label} elapsed={elapsed / 60:.1f}m",
+            flush=True,
+        )
+    suite_elapsed = time.monotonic() - suite_started
+    print(
+        f"[SUITE DONE] experiment={args.experiment} runs={len(jobs)} "
+        f"elapsed={suite_elapsed / 3600:.2f}h",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

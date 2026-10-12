@@ -44,10 +44,28 @@ python -m pytest -q
 
 ## Run acquisition baselines
 
+Run the three evaluations independently. The commands below intentionally
+include `--overwrite` because they are for a clean re-evaluation of the named
+run directories; omit it when you want the existing-artifact guard instead.
+
 ```bash
-python scripts/run_baseline.py --method base --config configs/baseline_base.yaml
-python scripts/run_baseline.py --method random --config configs/baseline_random.yaml
-python scripts/run_baseline.py --method uncertainty --config configs/baseline_uncertainty.yaml
+# 1. Unadapted Base checkpoint
+python scripts/run_baseline.py \
+  --method base \
+  --config configs/baseline_base.yaml \
+  --overwrite
+
+# 2. Random MNLI acquisition + LoRA
+python scripts/run_baseline.py \
+  --method random \
+  --config configs/baseline_random.yaml \
+  --overwrite
+
+# 3. Entropy-based Uncertainty MNLI acquisition + LoRA
+python scripts/run_baseline.py \
+  --method uncertainty \
+  --config configs/baseline_uncertainty.yaml \
+  --overwrite
 ```
 
 Each run saves `config.yaml`, `run.json`, `rounds.jsonl`, `metrics.json`,
@@ -55,11 +73,46 @@ Each run saves `config.yaml`, `run.json`, `rounds.jsonl`, `metrics.json`,
 also save their LoRA adapter. Existing non-empty runs are rejected unless the
 command includes the explicit `--overwrite` flag.
 
-To compare completed local runs:
+After all three commands finish, build the validated comparison report and
+visualizations with one command:
 
 ```bash
-python scripts/summarize_runs.py --outputs outputs
+python scripts/report_hans_baselines.py \
+  --outputs outputs \
+  --report-dir reports/hans_baselines_seed42
 ```
+
+The same workflow is available as a shell script when you want to run each
+stage explicitly:
+
+```bash
+bash run_hans_baselines_individual.sh base
+bash run_hans_baselines_individual.sh random
+bash run_hans_baselines_individual.sh uncertainty
+bash run_hans_baselines_individual.sh report
+```
+
+Or run the complete sequence:
+
+```bash
+bash run_hans_baselines_individual.sh all
+```
+
+Set `CUDA_DEVICE=<index>` before the command to select another physical GPU.
+
+The reporter requires all three full HANS artifacts, verifies that they contain
+the same example IDs, recomputes metrics from predictions, and refuses partial
+or inconsistent inputs. It creates:
+
+- `reports/hans_baselines_seed42/HANS_BASELINE_REPORT.md`;
+- `data/run_summary.csv`, `data/group_metrics_long.csv`, and `data/results.json`;
+- `figures/overall_accuracy.svg`, `label_heuristic_accuracy.svg`, and
+  `subcase_accuracy_heatmap.svg`.
+
+To additionally compare the separately generated `hans_qwen3_1_7b_base`
+zero-shot artifact, append `--include-standalone-zero-shot`. For a quick console
+table only, `python scripts/summarize_runs.py --outputs outputs` remains
+available.
 
 For the full CUDA 0 benchmark suite (zero-shot plus Base, Random, and
 Uncertainty), activate `active_lr` and run the non-overwriting orchestrator:
@@ -260,10 +313,20 @@ done
 Experiment A — one fixed-budget update at 32, 64, and 128 examples:
 
 ```bash
-python scripts/run_stage2_suite.py \
-  --config configs/stage2_benchmark.yaml \
-  --experiment A \
-  --output-root outputs/stage2_runs
+./run_experiment_A.sh
+```
+
+`run_experiment_A.sh` validates the frozen artifacts, builds the nine required
+synthetic pools sequentially, runs all 54 method/budget/seed cells, and produces
+the combined report plus three SVG visualizations under
+`reports/stage2_experiment_A/`. Completed runs are skipped on restart and partial
+directories are archived under `logs/stage2_experiment_A/partial_runs/` rather
+than deleted. The terminal shows `[POOL x/9]`, `[RUN x/54]`, elapsed time, and
+live `tqdm` bars for teacher generation, verification, QC, inference, and LoRA
+training. To rebuild only the report after all 54 runs are complete:
+
+```bash
+./run_experiment_A.sh --report-only
 ```
 
 Experiment B — four rounds × 32 fresh examples, total 128:

@@ -143,6 +143,7 @@ fi
 python scripts/report_hans_baselines.py \
   --outputs outputs \
   --report-dir "$REPORT_DIR" \
+  --include-standalone-zero-shot \
   2>&1 | tee "$LOG_DIR/04_report.log"
 
 echo

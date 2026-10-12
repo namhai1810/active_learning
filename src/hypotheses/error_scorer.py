@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
+from tqdm.auto import tqdm
 
 
 ERROR_SCORING_PROMPT_VERSION = "discovery_error_probability_v1"
@@ -92,9 +93,14 @@ class TeacherErrorProbabilityScorer:
             raise ValueError("Error scoring requires unique example IDs")
         scores: dict[str, float] = {}
         logs: list[dict[str, Any]] = []
-        for batch_index, start in enumerate(
-            range(0, len(sanitized), self.config.max_records_per_call)
-        ):
+        batch_starts = range(0, len(sanitized), self.config.max_records_per_call)
+        for batch_index, start in enumerate(tqdm(
+            batch_starts,
+            desc="discovery error scoring",
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=1.0,
+        )):
             batch = sanitized[start : start + self.config.max_records_per_call]
             system_prompt = (
                 "You are an NLI prediction critic. For each item estimate the "

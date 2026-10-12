@@ -11,3 +11,4 @@ test_*
 !tests/test_cost_aware.py
 !tests/test_multiround.py
 !tests/test_stage2_benchmark.py
+!tests/test_report_hans_baselines.py

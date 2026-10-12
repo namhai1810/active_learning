@@ -1,4 +1,7 @@
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +17,9 @@ from src.decision.cost_aware import select_intervention
 from src.decision.types import DecisionCandidate
 from src.evaluation.metrics import compute_hans_metrics
 from src.synthetic.types import SyntheticNLIExample
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _hans_rows(n=40):
@@ -199,3 +205,84 @@ def test_budget_admission_uses_projected_marginal_not_total_cost():
         [candidate], 0.01, max_cost=2.0, budget_costs={"h1": 1.5}
     )
     assert decision.action == "continue"
+
+
+def test_stage2_report_generates_visualizations(tmp_path):
+    run = tmp_path / "runs" / "zero_shot" / "budget_32" / "seed_42"
+    run.mkdir(parents=True)
+    result = {
+        "experiment": "A",
+        "method": "zero_shot",
+        "seed": 42,
+        "requested_budget": 32,
+        "actual_final_training_examples": 0,
+        "shortage": False,
+        "cross_source_baseline": False,
+        "manifest_hash": "frozen-test-manifest",
+        "pilot_count": 0,
+        "optimizer_steps": 0,
+        "training_gpu_seconds": 0,
+        "acquisition_gpu_seconds": 0,
+        "evaluation_gpu_seconds": 0,
+        "resource_usage": {
+            "llm_input_tokens": 0,
+            "llm_output_tokens": 0,
+            "generated_items": 0,
+        },
+        "assumed_cost": {"total": 0.5},
+        "hans_final": {
+            "overall_accuracy": 0.5,
+            "non_entailment_accuracy": 0.4,
+            "accuracy_by_heuristic": {
+                "lexical_overlap": 0.5,
+                "subsequence": 0.5,
+                "constituent": 0.5,
+            },
+            "accuracy_by_subcase": {"toy": 0.5},
+        },
+        "mnli": {
+            "matched": {"accuracy": 0.3},
+            "mismatched": {"accuracy": 0.2},
+        },
+        "leakage_audit": {"passed": True},
+        "learning_curve_file": "posthoc_gain_eval_curve.json",
+    }
+    (run / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    curve = {
+        "points": [
+            {
+                "round": 0,
+                "evaluation_role": "gain_eval",
+                "cumulative_final_training_examples": 0,
+                "cumulative_total_cost": 0.25,
+                "metrics": {
+                    "overall_accuracy": 0.45,
+                    "non_entailment_accuracy": 0.35,
+                },
+            }
+        ]
+    }
+    (run / "posthoc_gain_eval_curve.json").write_text(
+        json.dumps(curve), encoding="utf-8"
+    )
+    report = tmp_path / "report"
+    subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "report_stage2_benchmark.py"),
+            "--runs-root",
+            str(tmp_path / "runs"),
+            "--output-dir",
+            str(report),
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert (report / "STAGE2_REPORT.md").is_file()
+    assert (report / "stage2_summary.csv").is_file()
+    assert (report / "stage2_learning_curves.csv").is_file()
+    assert (report / "figures" / "experiment_a_final_hans_accuracy.svg").is_file()
+    assert (report / "figures" / "experiment_a_gain_eval_learning_curve.svg").is_file()
+    assert (report / "figures" / "experiment_a_accuracy_vs_cost.svg").is_file()

@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from src.data.labels import HANS_LABELS, MNLI_LABELS, mnli_to_hans, normalize_mnli_label
 from src.hypotheses.types import FailureHypothesis
 from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
+from tqdm.auto import tqdm
 
 
 VERIFICATION_PROBE_PROMPT_VERSION = "controlled_verification_probes_v1"
@@ -200,6 +201,13 @@ class ControlledVerificationProbeGenerator:
         logs: list[dict[str, Any]] = []
         remaining = self.config.n_probe_sets
         batch_index = 0
+        progress = tqdm(
+            total=self.config.n_probe_sets,
+            desc=f"verification generation [{hypothesis.id[:16]}]",
+            unit="set",
+            dynamic_ncols=True,
+            mininterval=1.0,
+        )
         while remaining:
             requested = min(remaining, self.config.max_probe_sets_per_call)
             payload = {
@@ -356,6 +364,9 @@ class ControlledVerificationProbeGenerator:
             logs.append(teacher_exchange_log(self.teacher, call, response))
             remaining -= requested
             batch_index += 1
+            progress.update(requested)
+            progress.set_postfix(call=batch_index, refresh=False)
+        progress.close()
         return generated, {
             "hypothesis_id": hypothesis.id,
             "selected_context_ids": [str(row["id"]) for row in selected_context],
@@ -402,9 +413,14 @@ class TeacherVerificationProbeValidator:
             "suitable_control",
             "reasons",
         }
-        for batch_index, start in enumerate(
-            range(0, len(set_ids), self.max_probe_sets_per_call)
-        ):
+        batch_starts = range(0, len(set_ids), self.max_probe_sets_per_call)
+        for batch_index, start in enumerate(tqdm(
+            batch_starts,
+            desc=f"verification QC [{hypothesis.id[:16]}]",
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=1.0,
+        )):
             batch_ids = set_ids[start : start + self.max_probe_sets_per_call]
             batch = [probe for set_id in batch_ids for probe in grouped[set_id]]
             payload = {

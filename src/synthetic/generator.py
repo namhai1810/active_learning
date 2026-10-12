@@ -12,6 +12,7 @@ from src.data.labels import MNLI_LABELS
 from src.hypotheses.types import FailureHypothesis
 from src.synthetic.types import SYNTHETIC_PAIR_MEMBERS, SyntheticNLIExample
 from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
+from tqdm.auto import tqdm
 
 
 SYNTHETIC_PROMPT_VERSION = "targeted_synthetic_nli_pairs_v2"
@@ -167,6 +168,13 @@ class TargetedSyntheticGenerator:
         )
         batch_index = 0
         offset = 0
+        progress = tqdm(
+            total=len(schedule),
+            desc=f"synthetic generation [{hypothesis.id[:16]}]",
+            unit="pair",
+            dynamic_ncols=True,
+            mininterval=1.0,
+        )
         while offset < len(schedule):
             pair_type = schedule[offset]
             run_end = offset
@@ -307,6 +315,13 @@ class TargetedSyntheticGenerator:
             )
             offset += requested
             batch_index += 1
+            progress.update(requested)
+            progress.set_postfix(
+                call=batch_index,
+                pair_type=pair_type,
+                refresh=False,
+            )
+        progress.close()
         return generated, {
             "hypothesis_id": hypothesis.id,
             "selected_seed_ids": [str(row["id"]) for row in selected_seeds],

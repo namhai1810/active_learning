@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import math
 import statistics
@@ -18,7 +19,25 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.artifacts import read_json
-from src.utils.io import write_json
+from src.utils.io import _atomic_text_write, write_json
+
+
+METHOD_ORDER = (
+    "zero_shot",
+    "random_mnli",
+    "uncertainty_mnli",
+    "random_synthetic",
+    "failure_driven_no_verification",
+    "ours_verified",
+)
+METHOD_COLORS = {
+    "zero_shot": "#64748B",
+    "random_mnli": "#3B82F6",
+    "uncertainty_mnli": "#8B5CF6",
+    "random_synthetic": "#F59E0B",
+    "failure_driven_no_verification": "#F97316",
+    "ours_verified": "#10B981",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +66,210 @@ def _summary(values: list[float]) -> dict[str, float | int | None]:
         "std": std,
         "normal_95ci_half_width": 1.96 * std / math.sqrt(len(values)),
     }
+
+
+def _svg(width: int, height: int, title: str, body: list[str]) -> str:
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img">
+<title>{html.escape(title)}</title>
+<rect width="100%" height="100%" fill="#FFFFFF" rx="16"/>
+<style>
+text {{ font-family: Inter, ui-sans-serif, system-ui, sans-serif; fill: #334155; }}
+.title {{ font-size: 22px; font-weight: 700; fill: #0F172A; }}
+.axis {{ font-size: 11px; fill: #64748B; }}
+.label {{ font-size: 12px; font-weight: 600; }}
+</style>
+{chr(10).join(body)}
+</svg>
+'''
+
+
+def _write_final_accuracy_figure(
+    summaries: list[dict[str, Any]], figures: Path
+) -> None:
+    rows = [
+        row for row in summaries
+        if row["experiment"] == "A"
+        and row["hans_final.overall_accuracy"]["mean"] is not None
+    ]
+    rows.sort(
+        key=lambda row: (
+            METHOD_ORDER.index(row["method"]),
+            int(row["budget"]),
+        )
+    )
+    width, row_height = 1120, 34
+    left, right, top, bottom = 310, 55, 90, 55
+    height = top + bottom + row_height * len(rows)
+    chart_width = width - left - right
+    body = [
+        '<text x="34" y="40" class="title">Experiment A · sealed HANS final accuracy</text>',
+        '<text x="34" y="64" class="axis">Mean across completed seeds; error bars are descriptive 95% normal intervals</text>',
+    ]
+    for tick in range(0, 101, 20):
+        x = left + chart_width * tick / 100
+        body.extend(
+            [
+                f'<line x1="{x:.1f}" y1="{top-12}" x2="{x:.1f}" y2="{height-bottom}" stroke="#E2E8F0"/>',
+                f'<text x="{x:.1f}" y="{height-bottom+24}" text-anchor="middle" class="axis">{tick}%</text>',
+            ]
+        )
+    for index, row in enumerate(rows):
+        y = top + index * row_height
+        mean = 100.0 * float(row["hans_final.overall_accuracy"]["mean"])
+        ci = 100.0 * float(
+            row["hans_final.overall_accuracy"]["normal_95ci_half_width"] or 0.0
+        )
+        end = left + chart_width * mean / 100.0
+        low = left + chart_width * max(0.0, mean - ci) / 100.0
+        high = left + chart_width * min(100.0, mean + ci) / 100.0
+        label = html.escape(f'{row["method"]} · budget {row["budget"]}')
+        color = METHOD_COLORS.get(row["method"], "#334155")
+        body.extend(
+            [
+                f'<text x="{left-12}" y="{y+19}" text-anchor="end" class="label">{label}</text>',
+                f'<rect x="{left}" y="{y+6}" width="{max(1.0, end-left):.1f}" height="16" rx="4" fill="{color}" opacity="0.88"/>',
+                f'<line x1="{low:.1f}" y1="{y+14}" x2="{high:.1f}" y2="{y+14}" stroke="#0F172A" stroke-width="1.5"/>',
+                f'<text x="{min(width-right, end+7):.1f}" y="{y+19}" class="axis">{mean:.2f}%</text>',
+            ]
+        )
+    _atomic_text_write(
+        figures / "experiment_a_final_hans_accuracy.svg",
+        _svg(width, height, "Experiment A final HANS accuracy", body),
+    )
+
+
+def _write_learning_curve_figure(
+    curves: list[dict[str, Any]], figures: Path
+) -> None:
+    aggregated: dict[tuple[str, int], list[float]] = defaultdict(list)
+    for row in curves:
+        mean = row["gain_eval_overall_accuracy"]["mean"]
+        if row["experiment"] == "A" and mean is not None:
+            aggregated[
+                (row["method"], int(row["cumulative_final_training_examples"]))
+            ].append(float(mean))
+    series: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    for (method, examples), values in aggregated.items():
+        series[method].append((examples, statistics.mean(values)))
+    width, height = 1050, 620
+    left, right, top, bottom = 90, 250, 90, 80
+    chart_width, chart_height = width - left - right, height - top - bottom
+    max_examples = max(
+        1,
+        max((x for points in series.values() for x, _ in points), default=1),
+    )
+    body = [
+        '<text x="34" y="40" class="title">Experiment A · post-hoc gain-eval learning curve</text>',
+        '<text x="34" y="64" class="axis">The sealed final-test is not used for these intermediate curves</text>',
+    ]
+    for tick in range(0, 101, 20):
+        y = top + chart_height * (1.0 - tick / 100.0)
+        body.extend(
+            [
+                f'<line x1="{left}" y1="{y:.1f}" x2="{width-right}" y2="{y:.1f}" stroke="#E2E8F0"/>',
+                f'<text x="{left-12}" y="{y+4:.1f}" text-anchor="end" class="axis">{tick}%</text>',
+            ]
+        )
+    for tick in (0, 32, 64, 96, 128):
+        if tick > max_examples:
+            continue
+        x = left + chart_width * tick / max_examples
+        body.append(
+            f'<text x="{x:.1f}" y="{height-bottom+27}" text-anchor="middle" class="axis">{tick}</text>'
+        )
+    for legend_index, method in enumerate(METHOD_ORDER):
+        points = sorted(series.get(method, []))
+        if not points:
+            continue
+        color = METHOD_COLORS[method]
+        coordinates = [
+            (
+                left + chart_width * examples / max_examples,
+                top + chart_height * (1.0 - accuracy),
+            )
+            for examples, accuracy in points
+        ]
+        body.append(
+            '<polyline points="{}" fill="none" stroke="{}" stroke-width="3"/>'.format(
+                " ".join(f"{x:.1f},{y:.1f}" for x, y in coordinates), color
+            )
+        )
+        for x, y in coordinates:
+            body.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}"/>')
+        legend_y = top + legend_index * 28
+        body.extend(
+            [
+                f'<rect x="{width-right+35}" y="{legend_y-9}" width="18" height="5" fill="{color}"/>',
+                f'<text x="{width-right+62}" y="{legend_y}" class="label">{html.escape(method)}</text>',
+            ]
+        )
+    body.extend(
+        [
+            f'<text x="{left+chart_width/2:.1f}" y="{height-22}" text-anchor="middle" class="axis">Cumulative final-training examples</text>',
+            f'<text x="22" y="{top+chart_height/2:.1f}" text-anchor="middle" class="axis" transform="rotate(-90 22 {top+chart_height/2:.1f})">gain_eval accuracy</text>',
+        ]
+    )
+    _atomic_text_write(
+        figures / "experiment_a_gain_eval_learning_curve.svg",
+        _svg(width, height, "Experiment A gain-eval learning curve", body),
+    )
+
+
+def _write_cost_accuracy_figure(
+    summaries: list[dict[str, Any]], figures: Path
+) -> None:
+    rows = [
+        row for row in summaries
+        if row["experiment"] == "A"
+        and row["hans_final.overall_accuracy"]["mean"] is not None
+        and row["assumed_cost.total"]["mean"] is not None
+    ]
+    width, height = 1100, 650
+    left, right, top, bottom = 95, 280, 90, 85
+    chart_width, chart_height = width - left - right, height - top - bottom
+    max_cost = max((float(row["assumed_cost.total"]["mean"]) for row in rows), default=1.0)
+    max_cost = max(max_cost, 1e-12)
+    body = [
+        '<text x="34" y="40" class="title">Experiment A · final accuracy versus modeled cost</text>',
+        '<text x="34" y="64" class="axis">Cost uses measured quantities and configured rates saved by each run</text>',
+    ]
+    for tick in range(0, 101, 20):
+        y = top + chart_height * (1.0 - tick / 100.0)
+        body.extend(
+            [
+                f'<line x1="{left}" y1="{y:.1f}" x2="{width-right}" y2="{y:.1f}" stroke="#E2E8F0"/>',
+                f'<text x="{left-12}" y="{y+4:.1f}" text-anchor="end" class="axis">{tick}%</text>',
+            ]
+        )
+    for index in range(6):
+        value = max_cost * index / 5
+        x = left + chart_width * index / 5
+        body.append(
+            f'<text x="{x:.1f}" y="{height-bottom+27}" text-anchor="middle" class="axis">{value:.3g}</text>'
+        )
+    for row in rows:
+        cost = float(row["assumed_cost.total"]["mean"])
+        accuracy = float(row["hans_final.overall_accuracy"]["mean"])
+        x = left + chart_width * cost / max_cost
+        y = top + chart_height * (1.0 - accuracy)
+        color = METHOD_COLORS.get(row["method"], "#334155")
+        label = html.escape(f'{row["method"]} · b{row["budget"]}')
+        body.extend(
+            [
+                f'<circle cx="{x:.1f}" cy="{y:.1f}" r="6" fill="{color}"><title>{label}: cost={cost:.6g}, accuracy={accuracy:.4f}</title></circle>',
+                f'<text x="{width-right+30}" y="{top+16*rows.index(row):.1f}" class="axis" fill="{color}">{label}</text>',
+            ]
+        )
+    body.extend(
+        [
+            f'<text x="{left+chart_width/2:.1f}" y="{height-23}" text-anchor="middle" class="axis">Modeled total cost</text>',
+            f'<text x="22" y="{top+chart_height/2:.1f}" text-anchor="middle" class="axis" transform="rotate(-90 22 {top+chart_height/2:.1f})">Sealed HANS final accuracy</text>',
+        ]
+    )
+    _atomic_text_write(
+        figures / "experiment_a_accuracy_vs_cost.svg",
+        _svg(width, height, "Experiment A accuracy versus cost", body),
+    )
 
 
 def main() -> None:
@@ -242,6 +465,11 @@ def main() -> None:
                     ],
                 }
             )
+    figures = output / "figures"
+    figures.mkdir(parents=True, exist_ok=True)
+    _write_final_accuracy_figure(summaries, figures)
+    _write_learning_curve_figure(curve_summaries, figures)
+    _write_cost_accuracy_figure(summaries, figures)
     lines = [
         "# Stage 2 benchmark report",
         "",
@@ -250,6 +478,12 @@ def main() -> None:
         "Random/Uncertainty are MNLI cross-source baselines; equal data access with "
         "HANS-guided synthetic methods is not claimed. Synthetic pair structure is "
         "used for selection only; training uses per-example cross-entropy.",
+        "",
+        "![Experiment A final HANS accuracy](figures/experiment_a_final_hans_accuracy.svg)",
+        "",
+        "![Experiment A gain-eval learning curve](figures/experiment_a_gain_eval_learning_curve.svg)",
+        "",
+        "![Experiment A accuracy versus cost](figures/experiment_a_accuracy_vs_cost.svg)",
         "",
         "| Exp. | Method | Budget | Seeds | HANS acc. | HANS non-ent. | MNLI m/mm | Actual train | Assumed cost | Shortage | Leakage audit |",
         "|---|---|---:|---|---:|---:|---:|---:|---:|---|---|",
@@ -306,8 +540,17 @@ def main() -> None:
             "with three seeds they should not be interpreted as strong coverage guarantees.",
         ]
     )
-    (output / "STAGE2_REPORT.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(json.dumps({"runs": len(results), "groups": len(summaries)}, indent=2))
+    _atomic_text_write(output / "STAGE2_REPORT.md", "\n".join(lines) + "\n")
+    print(
+        json.dumps(
+            {
+                "runs": len(results),
+                "groups": len(summaries),
+                "figures": 3,
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

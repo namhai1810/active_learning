@@ -30,8 +30,8 @@ class RunSpec:
     method: str
 
 
-DEFAULT_RUNS = (
-    RunSpec("HANS zero-shot", "hans_qwen3_1_7b_base", "zero_shot"),
+ZERO_SHOT_RUN = RunSpec("HANS zero-shot", "hans_qwen3_1_7b_base", "zero_shot")
+BASELINE_RUNS = (
     RunSpec("Base", "baseline_base_b32_seed42", "base"),
     RunSpec("Random", "baseline_random_b32_seed42", "random"),
     RunSpec("Uncertainty", "baseline_uncertainty_b32_seed42", "uncertainty"),
@@ -79,6 +79,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=30_000,
         help="Required prediction count per run (default: full 30,000-row HANS)",
+    )
+    parser.add_argument(
+        "--include-standalone-zero-shot",
+        action="store_true",
+        help=(
+            "Also require outputs/hans_qwen3_1_7b_base. By default the report "
+            "uses only Base, Random, and Uncertainty so each input is produced "
+            "by scripts/run_baseline.py."
+        ),
     )
     return parser.parse_args()
 
@@ -311,7 +320,10 @@ def _plot_overall(summaries: list[dict[str, Any]], figures_dir: Path) -> None:
         )
     slot = chart_width / len(summaries)
     bar_width = min(130.0, slot * 0.58)
-    for index, (row, value, color) in enumerate(zip(summaries, values, COLORS, strict=True)):
+    colors = COLORS[: len(summaries)]
+    for index, (row, value, color) in enumerate(
+        zip(summaries, values, colors, strict=True)
+    ):
         x = left + slot * index + (slot - bar_width) / 2
         bar_height = chart_height * value / 100.0
         y = top + chart_height - bar_height
@@ -345,6 +357,7 @@ def _plot_grouped(summaries: list[dict[str, Any]], figures_dir: Path) -> None:
     gap = 4.0
     bar_width = min(46.0, (group_slot - 24.0) / len(summaries) - gap)
     cluster_width = len(summaries) * (bar_width + gap) - gap
+    colors = COLORS[: len(summaries)]
     parts = [
         '<text x="42" y="43" class="title">Accuracy decomposition</text>',
         '<text x="42" y="69" class="subtitle">Labels and HANS heuristics · full benchmark</text>',
@@ -360,7 +373,9 @@ def _plot_grouped(summaries: list[dict[str, Any]], figures_dir: Path) -> None:
     for metric_index, (field, label) in enumerate(metrics):
         center = left + group_slot * (metric_index + 0.5)
         start = center - cluster_width / 2
-        for run_index, (row, color) in enumerate(zip(summaries, COLORS, strict=True)):
+        for run_index, (row, color) in enumerate(
+            zip(summaries, colors, strict=True)
+        ):
             x = start + run_index * (bar_width + gap)
             if row[field] is None:
                 parts.append(
@@ -379,7 +394,9 @@ def _plot_grouped(summaries: list[dict[str, Any]], figures_dir: Path) -> None:
     legend_y = height - 52
     legend_width = 235
     legend_start = (width - legend_width * len(summaries)) / 2
-    for index, (row, color) in enumerate(zip(summaries, COLORS, strict=True)):
+    for index, (row, color) in enumerate(
+        zip(summaries, colors, strict=True)
+    ):
         x = legend_start + index * legend_width
         parts.extend(
             [
@@ -476,15 +493,19 @@ def _number(value: Any, digits: int = 2) -> str:
 
 
 def _markdown_table(summaries: list[dict[str, Any]]) -> str:
-    zero_shot = summaries[0]["overall_accuracy"]
+    reference = next(
+        (row for row in summaries if row["method"] == "zero_shot"),
+        next(row for row in summaries if row["method"] == "base"),
+    )
+    reference_accuracy = reference["overall_accuracy"]
     header = (
-        "| Method | N | Acquired | Overall | Δ vs zero-shot | Entail. | "
+        f"| Method | N | Acquired | Overall | Δ vs {reference['name']} | Entail. | "
         "Non-entail. | Lexical | Subsequence | Constituent | Wall time (min) |\n"
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     )
     rows = [header]
     for row in summaries:
-        delta = 100.0 * (row["overall_accuracy"] - zero_shot)
+        delta = 100.0 * (row["overall_accuracy"] - reference_accuracy)
         rows.append(
             "| {name} | {num_examples:,} | {num_acquired:,} | {overall} | {delta:+.2f} pp | "
             "{entailment} | {non_entailment} | {lexical} | {subsequence} | "
@@ -511,9 +532,18 @@ def _markdown_table(summaries: list[dict[str, Any]]) -> str:
 
 def _build_markdown(summaries: list[dict[str, Any]], generated_at: str) -> str:
     best = max(summaries, key=lambda row: row["overall_accuracy"])
-    base_gap = 100.0 * (
-        summaries[1]["overall_accuracy"] - summaries[0]["overall_accuracy"]
-    )
+    by_method = {row["method"]: row for row in summaries}
+    reproducibility_note = ""
+    if "zero_shot" in by_method:
+        base_gap = 100.0 * (
+            by_method["base"]["overall_accuracy"]
+            - by_method["zero_shot"]["overall_accuracy"]
+        )
+        reproducibility_note = (
+            " Base differs from the standalone zero-shot evaluation by "
+            f"**{base_gap:+.4f} percentage points**; this is a reproducibility "
+            "check because both use the same unadapted checkpoint."
+        )
     metadata_rows = []
     for row in summaries:
         commit = row["git_commit"][:12] if row["git_commit"] else "—"
@@ -522,7 +552,7 @@ def _build_markdown(summaries: list[dict[str, Any]], generated_at: str) -> str:
             f"`{row['student_model'] or '—'}` | `{row['device'] or '—'}` | "
             f"{row['gpu_name'] or '—'} | `{commit}` |"
         )
-    return f"""# HANS zero-shot and acquisition baselines
+    return f"""# HANS acquisition baselines
 
 Generated automatically at `{generated_at}`. This report contains full HANS runs only; smoke artifacts are excluded.
 
@@ -530,7 +560,7 @@ Generated automatically at `{generated_at}`. This report contains full HANS runs
 
 {_markdown_table(summaries)}
 
-The highest observed single-seed HANS accuracy is **{best['name']}** at **{_percent(best['overall_accuracy'])}**. Base differs from the standalone zero-shot evaluation by **{base_gap:+.4f} percentage points**; this is a reproducibility check because both use the same unadapted checkpoint.
+The highest observed single-seed HANS accuracy is **{best['name']}** at **{_percent(best['overall_accuracy'])}**.{reproducibility_note}
 
 ![Overall HANS accuracy](figures/overall_accuracy.svg)
 
@@ -559,7 +589,7 @@ The highest observed single-seed HANS accuracy is **{best['name']}** at **{_perc
 ## Interpretation guardrails
 
 - These are single-seed results (`seed=42`), so the report intentionally shows no confidence intervals.
-- HANS zero-shot and Base are separate executions of the same unadapted model; disagreement indicates run-to-run or configuration drift.
+- Base is the unadapted checkpoint and is the default reference for Random and Uncertainty. When `--include-standalone-zero-shot` is used, its agreement with Base is an additional reproducibility check.
 - Random and Uncertainty both use acquisition budget 32 and the same LoRA recipe.
 - Do not replace missing values with zero. The reporter fails on incomplete artifacts or disagreement between `metrics.json` and recomputed prediction-level metrics.
 """
@@ -569,9 +599,14 @@ def main() -> None:
     args = parse_args()
     outputs_root = Path(args.outputs).resolve()
     report_dir = Path(args.report_dir).resolve()
+    run_specs = (
+        (ZERO_SHOT_RUN, *BASELINE_RUNS)
+        if args.include_standalone_zero_shot
+        else BASELINE_RUNS
+    )
     summaries: list[dict[str, Any]] = []
     group_rows: list[dict[str, Any]] = []
-    for spec in DEFAULT_RUNS:
+    for spec in run_specs:
         summary, groups = collect_run(outputs_root, spec)
         summaries.append(summary)
         group_rows.extend(groups)
@@ -612,7 +647,7 @@ def main() -> None:
             "generated_at_utc": generated_at,
             "runs": summaries,
             "group_metrics": group_rows,
-            "run_specification": [asdict(spec) for spec in DEFAULT_RUNS],
+            "run_specification": [asdict(spec) for spec in run_specs],
         },
     )
     _plot_overall(summaries, figures_dir)
