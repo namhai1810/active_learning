@@ -21,7 +21,7 @@ from src.data.pipeline_split import (
 )
 from src.hypotheses.types import FailureHypothesis
 from src.models.qwen_nli import QwenNLIStudent
-from src.teacher import build_teacher
+from src.teacher import PersistentJSONTeacherCache, build_teacher
 from src.utils.artifacts import read_json, read_jsonl
 from src.utils.config import load_yaml_with_extends, require_mapping
 from src.utils.io import write_json, write_jsonl
@@ -85,7 +85,11 @@ def main() -> None:
     verification = require_mapping(config, "verification")
     teacher_config = require_mapping(config, "teacher")
     model = require_mapping(config, "model")
-    teacher = build_teacher(teacher_config)
+    run_dir = Path(args.run_dir)
+    teacher = PersistentJSONTeacherCache(
+        build_teacher(teacher_config),
+        run_dir / "teacher_calls" / "response_cache",
+    )
     requested_sets = int(
         verification.get("n_probe_sets", verification.get("n_probes", 50))
     )
@@ -126,7 +130,6 @@ def main() -> None:
     K = int(verification["max_hypotheses_per_round"])
     T = int(verification["max_rounds"])
 
-    run_dir = Path(args.run_dir)
     required = {
         "predictions": run_dir / "predictions.jsonl",
         "hypotheses": run_dir / "hypotheses.json",

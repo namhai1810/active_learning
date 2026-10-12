@@ -20,6 +20,8 @@ EXPERIMENT_ROOT="$RUN_ROOT/experiment_a"
 REPORT_DIR="reports/stage2_experiment_A"
 LOG_DIR="logs/stage2_experiment_A"
 PARTIAL_DIR="$LOG_DIR/partial_runs"
+SUITE_LOG="$LOG_DIR/experiment_A.log"
+REPORT_LOG="$LOG_DIR/report.log"
 
 METHODS=(
   zero_shot
@@ -41,7 +43,9 @@ usage() {
   cat <<'EOF'
 Usage:
   ./run_experiment_A.sh
+  ./run_experiment_A.sh --quick
   ./run_experiment_A.sh --report-only
+  ./run_experiment_A.sh --quick --report-only
   ./run_experiment_A.sh --help
 
 Default workflow:
@@ -49,6 +53,11 @@ Default workflow:
   2. Build/validate synthetic pools for three methods and seeds 42, 43, 44.
   3. Run all 54 Experiment A cells sequentially.
   4. Aggregate JSON/CSV/Markdown and generate SVG visualizations.
+
+Quick workflow (--quick):
+  - Build only the three synthetic pools for seed 42.
+  - Run all six methods only at budget 128 (six benchmark cells).
+  - Reuse the same output layout, so a later full run skips completed work.
 
 Completed pools/runs are skipped. Incomplete run directories are moved into
 logs/stage2_experiment_A/partial_runs/ before resuming; they are never deleted.
@@ -59,12 +68,24 @@ EOF
 }
 
 MODE="all"
-case "${1:-}" in
-  "") ;;
-  --report-only) MODE="report" ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
+QUICK=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quick) QUICK=true ;;
+    --report-only) MODE="report" ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ "$QUICK" == true ]]; then
+  BUDGETS=(128)
+  SEEDS=(42)
+  REPORT_DIR="reports/stage2_experiment_A_quick"
+  SUITE_LOG="$LOG_DIR/experiment_A_quick.log"
+  REPORT_LOG="$LOG_DIR/report_quick.log"
+fi
 
 if [[ "${CONDA_DEFAULT_ENV:-}" != "active_lr" ]]; then
   echo "ERROR: activate the active_lr environment first:" >&2
@@ -131,15 +152,14 @@ build_synthetic_pools() {
         echo "[POOL $pool_index/$pool_total][SKIP] Complete: method=$method seed=$seed"
         continue
       fi
-      archive_incomplete_directory \
-        "$output" "$output/.complete" "acquisition_${method}_seed_${seed}"
       echo "[POOL $pool_index/$pool_total] method=$method seed=$seed"
       python scripts/build_stage2_synthetic_pool.py \
         --benchmark-config "$CONFIG" \
         --method "$method" \
         --seed "$seed" \
         --output-dir "$output" \
-        2>&1 | tee "$LOG_DIR/pool_${method}_seed_${seed}.log"
+        --resume \
+        2>&1 | tee -a "$LOG_DIR/pool_${method}_seed_${seed}.log"
       if [[ ! -f "$accepted" || ! -f "$manifest" ]]; then
         echo "ERROR: synthetic pool did not produce required artifacts: $output" >&2
         exit 1
@@ -162,32 +182,48 @@ recover_incomplete_benchmark_runs() {
 }
 
 run_benchmark_grid() {
-  echo "[PHASE 2/3] Running 6 methods × 3 budgets × 3 seeds = 54 runs"
+  local run_total=$((${#METHODS[@]} * ${#BUDGETS[@]} * ${#SEEDS[@]}))
+  echo "[PHASE 2/3] Running ${#METHODS[@]} methods × ${#BUDGETS[@]} budgets × ${#SEEDS[@]} seeds = $run_total runs"
   recover_incomplete_benchmark_runs
   python scripts/run_stage2_suite.py \
     --config "$CONFIG" \
     --experiment A \
     --output-root "$RUN_ROOT" \
-    2>&1 | tee "$LOG_DIR/experiment_A.log"
+    --methods "${METHODS[@]}" \
+    --budgets "${BUDGETS[@]}" \
+    --seeds "${SEEDS[@]}" \
+    2>&1 | tee -a "$SUITE_LOG"
 }
 
 build_report() {
   echo "[PHASE 3/3] Aggregating and visualizing Experiment A"
-  local completed
-  if [[ -d "$EXPERIMENT_ROOT" ]]; then
-    completed="$(find "$EXPERIMENT_ROOT" -name result.json -type f | wc -l)"
-  else
-    completed=0
-  fi
-  if [[ "$completed" -ne 54 ]]; then
-    echo "ERROR: expected 54 completed Experiment A runs, found $completed." >&2
-    echo "Resume with: ./run_experiment_A.sh" >&2
+  local completed=0
+  local expected=$((${#METHODS[@]} * ${#BUDGETS[@]} * ${#SEEDS[@]}))
+  for method in "${METHODS[@]}"; do
+    for budget in "${BUDGETS[@]}"; do
+      for seed in "${SEEDS[@]}"; do
+        if [[ -f "$EXPERIMENT_ROOT/$method/budget_$budget/seed_$seed/result.json" ]]; then
+          completed=$((completed + 1))
+        fi
+      done
+    done
+  done
+  if [[ "$completed" -ne "$expected" ]]; then
+    echo "ERROR: expected $expected selected Experiment A runs, found $completed." >&2
+    if [[ "$QUICK" == true ]]; then
+      echo "Resume with: ./run_experiment_A.sh --quick" >&2
+    else
+      echo "Resume with: ./run_experiment_A.sh" >&2
+    fi
     exit 1
   fi
   python scripts/report_stage2_benchmark.py \
     --runs-root "$EXPERIMENT_ROOT" \
     --output-dir "$REPORT_DIR" \
-    2>&1 | tee "$LOG_DIR/report.log"
+    --methods "${METHODS[@]}" \
+    --budgets "${BUDGETS[@]}" \
+    --seeds "${SEEDS[@]}" \
+    2>&1 | tee -a "$REPORT_LOG"
 
   local required_reports=(
     "$REPORT_DIR/STAGE2_REPORT.md"
@@ -216,6 +252,9 @@ fi
 
 echo "Experiment A executes sequentially and may take a long time."
 echo "Completed artifacts are resumable and will be skipped on the next invocation."
+if [[ "$QUICK" == true ]]; then
+  echo "Quick mode: seed=42, budget=128, methods=${METHODS[*]}"
+fi
 build_synthetic_pools
 run_benchmark_grid
 build_report

@@ -13,12 +13,35 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+EXPERIMENT_A_METHODS = (
+    "zero_shot", "random_mnli", "uncertainty_mnli",
+    "random_synthetic", "failure_driven_no_verification", "ours_verified",
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--experiment", required=True, choices=("A", "B"))
     parser.add_argument("--output-root", required=True)
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=EXPERIMENT_A_METHODS,
+        help="Run only these methods (default: the complete experiment grid).",
+    )
+    parser.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        help="Run only these configured seeds (default: every configured seed).",
+    )
+    parser.add_argument(
+        "--budgets",
+        nargs="+",
+        type=int,
+        help="Run only these configured budgets (default: every configured budget).",
+    )
     return parser.parse_args()
 
 
@@ -28,18 +51,32 @@ def main() -> None:
 
     config = load_yaml_with_extends(args.config)
     benchmark = require_mapping(config, "stage2_benchmark")
-    seeds = [int(item) for item in benchmark["seeds"]]
+    configured_seeds = [int(item) for item in benchmark["seeds"]]
+    configured_budgets = [int(item) for item in benchmark["budgets"]]
     if args.experiment == "A":
-        methods = (
-            "zero_shot", "random_mnli", "uncertainty_mnli",
-            "random_synthetic", "failure_driven_no_verification", "ours_verified",
-        )
-        budgets = [int(item) for item in benchmark["budgets"]]
+        default_methods = EXPERIMENT_A_METHODS
+        default_budgets = configured_budgets
         rounds, per_round = 1, None
     else:
-        methods = ("random_mnli", "uncertainty_mnli", "ours_verified")
-        budgets = [128]
+        default_methods = ("random_mnli", "uncertainty_mnli", "ours_verified")
+        default_budgets = [128]
         rounds, per_round = 4, 32
+    methods = tuple(args.methods) if args.methods else default_methods
+    seeds = list(args.seeds) if args.seeds else configured_seeds
+    budgets = list(args.budgets) if args.budgets else default_budgets
+    invalid_methods = sorted(set(methods) - set(default_methods))
+    invalid_seeds = sorted(set(seeds) - set(configured_seeds))
+    invalid_budgets = sorted(set(budgets) - set(default_budgets))
+    if invalid_methods:
+        raise ValueError(
+            f"Methods are outside Experiment {args.experiment}: {invalid_methods}"
+        )
+    if invalid_seeds:
+        raise ValueError(f"Seeds are outside the configured grid: {invalid_seeds}")
+    if invalid_budgets:
+        raise ValueError(
+            f"Budgets are outside Experiment {args.experiment}: {invalid_budgets}"
+        )
     root = Path(args.output_root).resolve() / f"experiment_{args.experiment.lower()}"
     jobs = [
         (method, budget, seed)

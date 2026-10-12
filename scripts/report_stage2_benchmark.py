@@ -44,6 +44,24 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs-root", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=METHOD_ORDER,
+        help="Include only these methods (default: all completed methods).",
+    )
+    parser.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        help="Include only these seeds (default: all completed seeds).",
+    )
+    parser.add_argument(
+        "--budgets",
+        nargs="+",
+        type=int,
+        help="Include only these budgets (default: all completed budgets).",
+    )
     return parser.parse_args()
 
 
@@ -277,11 +295,26 @@ def main() -> None:
     root = Path(args.runs_root).resolve()
     output = Path(args.output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    result_entries = [
+    discovered_entries = [
         (path, read_json(path)) for path in sorted(root.rglob("result.json"))
     ]
+    selected_methods = set(args.methods) if args.methods else None
+    selected_seeds = set(args.seeds) if args.seeds else None
+    selected_budgets = set(args.budgets) if args.budgets else None
+    result_entries = [
+        (path, result)
+        for path, result in discovered_entries
+        if (selected_methods is None or str(result.get("method")) in selected_methods)
+        and (selected_seeds is None or int(result.get("seed", -1)) in selected_seeds)
+        and (
+            selected_budgets is None
+            or int(result.get("requested_budget", -1)) in selected_budgets
+        )
+    ]
     if not result_entries:
-        raise FileNotFoundError(f"No Stage 2 result.json files beneath {root}")
+        raise FileNotFoundError(
+            f"No Stage 2 result.json files beneath {root} match the requested filters"
+        )
     results = [result for _, result in result_entries]
     hashes = {result.get("manifest_hash") for result in results}
     if len(hashes) != 1 or None in hashes:

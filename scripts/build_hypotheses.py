@@ -20,7 +20,7 @@ from src.data.pipeline_split import (
 )
 from src.hypotheses.llm_generator import LLMDiscoveryConfig, LLMFailureHypothesisGenerator
 from src.hypotheses.error_scorer import ErrorScoringConfig, TeacherErrorProbabilityScorer
-from src.teacher import build_teacher
+from src.teacher import PersistentJSONTeacherCache, build_teacher
 from src.utils.artifacts import read_jsonl
 from src.utils.config import load_yaml_with_extends, require_mapping
 from src.utils.io import write_json, write_jsonl
@@ -83,7 +83,10 @@ def main() -> None:
     discovery = materialize_role(
         indexed, split.discovery_ids, "hypothesis_discovery"
     )
-    teacher = build_teacher(teacher_config)
+    teacher = PersistentJSONTeacherCache(
+        build_teacher(teacher_config),
+        run_dir / "teacher_calls" / "response_cache",
+    )
     scorer_config_value = require_mapping(generation, "error_scorer")
     if scorer_config_value.get("type", "teacher_llm") != "teacher_llm":
         raise ValueError("Only the explicit teacher_llm discovery error scorer is supported")
