@@ -8,10 +8,12 @@ verification:
   max_hypotheses_per_round: 5
   max_rounds: 5
   max_context_records: 24
-  max_probe_sets_per_call: 8
+  max_probe_sets_per_call: 4
+  max_attempts_per_batch: 5
   near_duplicate_threshold: 0.92
   validation_max_probe_sets_per_call: 8
+  validation_max_attempts_per_batch: 5
   seed: 42
   label_validation_seed: 314159
-  probe_prompt_version: controlled_verification_probes_v1
+  probe_prompt_version: controlled_verification_probes_v3
   label_validation_prompt_version: verification_probe_validation_v1

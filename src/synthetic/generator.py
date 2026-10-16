@@ -20,7 +20,25 @@ from src.teacher.base import (
 from tqdm.auto import tqdm
 
 
-SYNTHETIC_PROMPT_VERSION = "targeted_synthetic_nli_pairs_v2"
+SYNTHETIC_PROMPT_VERSION = "targeted_synthetic_nli_pairs_v3"
+_GENERATION_DOMAINS = (
+    "household routines",
+    "workplace coordination",
+    "travel and transportation",
+    "healthcare administration",
+    "school and education",
+    "sports and recreation",
+    "arts and performances",
+    "shopping and deliveries",
+    "community events",
+    "nature and field research",
+    "technology support",
+    "cooking and restaurants",
+    "legal and civic procedures",
+    "construction and maintenance",
+    "science laboratories",
+    "finance and banking",
+)
 _GENERATED_PAIR_FIELDS = {
     "pair_type",
     "seed_example_ids",
@@ -43,6 +61,7 @@ class SyntheticGenerationConfig:
     invariant_pairs_per_hypothesis: int
     reasoning_contrast_pairs_per_hypothesis: int = 0
     max_seed_examples: int = 24
+    seed_examples_per_call: int = 4
     max_pairs_per_call: int = 8
     max_attempts_per_batch: int = 3
     seed: int = 42
@@ -55,7 +74,11 @@ class SyntheticGenerationConfig:
             raise ValueError("At least one invariant pair is required")
         if self.reasoning_contrast_pairs_per_hypothesis < 0:
             raise ValueError("reasoning_contrast_pairs_per_hypothesis cannot be negative")
-        if self.max_seed_examples <= 0 or self.max_pairs_per_call <= 0:
+        if (
+            self.max_seed_examples <= 0
+            or self.seed_examples_per_call <= 0
+            or self.max_pairs_per_call <= 0
+        ):
             raise ValueError("Synthetic seed and pair batch counts must be positive")
         if self.max_attempts_per_batch <= 0:
             raise ValueError("Synthetic max_attempts_per_batch must be positive")
@@ -200,9 +223,14 @@ class TargetedSyntheticGenerator:
         hypothesis: FailureHypothesis,
         intervention_records: Sequence[Mapping[str, Any]],
         *,
+        generation_round: int = 0,
+        pair_ordinal_start: int = 0,
+        avoid_examples: Sequence[SyntheticNLIExample] = (),
         resume_state: Mapping[str, Any] | None = None,
         checkpoint_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> tuple[list[SyntheticNLIExample], dict[str, Any]]:
+        if generation_round < 0 or pair_ordinal_start < 0:
+            raise ValueError("Generation round and pair ordinal must be non-negative")
         hypothesis.validate(require_llm_schema=self.failure_targeted)
         seen: set[str] = set()
         seeds = []
@@ -242,7 +270,10 @@ class TargetedSyntheticGenerator:
             "must change its correct label. An invariant pair changes only irrelevant "
             "entities/surface details and must preserve its correct label. A reasoning "
             "contrast pair, when requested, contrasts the required reasoning step. Use "
-            "seeds only as structural context; never copy or lightly paraphrase them. "
+            "seeds only as structural context; never copy, lightly paraphrase, or reuse "
+            "their named entities, predicates, sentence templates, or scenarios. Every "
+            "new batch must use a genuinely different topic and wording from earlier "
+            "batches. Do not deliberately mislabel an example. "
             "Use exact entailment/neutral/contradiction semantics; binary non-entailment "
             "does not imply contradiction. Return standalone JSON with no markdown."
         )
@@ -257,14 +288,27 @@ class TargetedSyntheticGenerator:
         call_logs: list[dict[str, Any]] = []
         batch_index = 0
         offset = 0
+        avoidance_digest = hashlib.sha256(
+            json.dumps(
+                [
+                    [item.premise, item.hypothesis]
+                    for item in avoid_examples
+                ],
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
         if resume_state is not None:
             expected_metadata = {
-                "version": 1,
+                "version": 2,
                 "hypothesis_id": hypothesis.id,
                 "failure_targeted": self.failure_targeted,
                 "prompt_version": self.config.prompt_version,
                 "selected_seed_ids": [str(row["id"]) for row in selected_seeds],
                 "schedule": schedule,
+                "generation_round": generation_round,
+                "pair_ordinal_start": pair_ordinal_start,
+                "avoidance_digest": avoidance_digest,
             }
             for field, expected in expected_metadata.items():
                 if resume_state.get(field) != expected:
@@ -317,6 +361,28 @@ class TargetedSyntheticGenerator:
                 run_end += 1
             requested = min(run_end - offset, self.config.max_pairs_per_call)
             member_roles = SYNTHETIC_PAIR_MEMBERS[pair_type]
+            seed_count = min(self.config.seed_examples_per_call, len(selected_seeds))
+            seed_start = (
+                generation_round * seed_count + batch_index * seed_count
+            ) % len(selected_seeds)
+            batch_seeds = [
+                selected_seeds[(seed_start + index) % len(selected_seeds)]
+                for index in range(seed_count)
+            ]
+            permitted_batch_ids = {str(row["id"]) for row in batch_seeds}
+            supplied_seeds = (
+                batch_seeds
+                if self.failure_targeted
+                else [{"id": str(row["id"])} for row in batch_seeds]
+            )
+            prior_examples = [*avoid_examples, *generated]
+            recent_avoidance = [
+                {"premise": item.premise, "hypothesis": item.hypothesis}
+                for item in prior_examples[-16:]
+            ]
+            domain = _GENERATION_DOMAINS[
+                (generation_round * 7 + batch_index) % len(_GENERATION_DOMAINS)
+            ]
             payload = {
                 "task": (
                     "generate_new_targeted_structured_nli_training_pairs"
@@ -330,6 +396,7 @@ class TargetedSyntheticGenerator:
                     "intervention_target": hypothesis.intervention_target,
                 },
                 "batch_index": batch_index,
+                "generation_round": generation_round,
                 "requested_pairs": requested,
                 "required_pair_type": pair_type,
                 "required_pair_members": list(member_roles),
@@ -338,6 +405,13 @@ class TargetedSyntheticGenerator:
                     "counterfactual": "two members, different labels, only failure-relevant relation changes",
                     "invariant": "two members, same label, only irrelevant content changes",
                     "reasoning_contrast": "two members requiring contrasting reasoning steps",
+                },
+                "novelty_contract": {
+                    "required_domain": domain,
+                    "must_be_new_scenarios": True,
+                    "must_not_copy_seed_text": True,
+                    "must_not_reuse_earlier_templates": True,
+                    "avoid_recent_examples": recent_avoidance,
                 },
                 "output_schema": {
                     "pairs": [
@@ -366,7 +440,7 @@ class TargetedSyntheticGenerator:
                         }
                     ]
                 },
-                "permitted_seed_examples": selected_seeds,
+                "permitted_seed_examples": supplied_seeds,
             }
             last_error: ValueError | None = None
             for attempt in range(self.config.max_attempts_per_batch):
@@ -383,7 +457,8 @@ class TargetedSyntheticGenerator:
                 derived_seed = int.from_bytes(
                     hashlib.sha256(
                         f"{self.config.seed}:{hypothesis.id}:generation:"
-                        f"{batch_index}:attempt:{attempt}".encode("utf-8")
+                        f"round:{generation_round}:batch:{batch_index}:"
+                        f"attempt:{attempt}".encode("utf-8")
                     ).digest()[:4],
                     "big",
                 )
@@ -407,8 +482,8 @@ class TargetedSyntheticGenerator:
                         pair_type=pair_type,
                         requested=requested,
                         member_roles=member_roles,
-                        permitted_ids=permitted_ids,
-                        pair_ordinal=len(generated) // 2,
+                        permitted_ids=permitted_batch_ids,
+                        pair_ordinal=pair_ordinal_start + len(generated) // 2,
                         prompt_version=self.config.prompt_version,
                     )
                 except ValueError as exc:
@@ -441,7 +516,7 @@ class TargetedSyntheticGenerator:
             if checkpoint_callback is not None:
                 checkpoint_callback(
                     {
-                        "version": 1,
+                        "version": 2,
                         "hypothesis_id": hypothesis.id,
                         "failure_targeted": self.failure_targeted,
                         "prompt_version": self.config.prompt_version,
@@ -449,6 +524,9 @@ class TargetedSyntheticGenerator:
                             str(row["id"]) for row in selected_seeds
                         ],
                         "schedule": schedule,
+                        "generation_round": generation_round,
+                        "pair_ordinal_start": pair_ordinal_start,
+                        "avoidance_digest": avoidance_digest,
                         "offset": offset,
                         "batch_index": batch_index,
                         "generated": [item.to_dict() for item in generated],

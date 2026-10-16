@@ -9,6 +9,7 @@ import filecmp
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,16 @@ POLICY_CONFIG = {
     "ours_verified": "stage2_generation_ours.yaml",
 }
 
+NO_CERTIFIED_STATUS = "abstained_no_certified_hypotheses"
+NO_CERTIFIED_REASON = "no_certified_hypotheses"
+SYNTHETIC_OUTPUTS = (
+    "synthetic/generated.jsonl",
+    "synthetic/accepted.jsonl",
+    "synthetic/rejected.jsonl",
+    "synthetic/manifest.json",
+    "teacher_calls/synthetic.jsonl",
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -36,6 +47,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--method", required=True, choices=sorted(POLICY_CONFIG))
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--discovery-config",
+        help="Optional hypothesis-discovery config (default: main config).",
+    )
+    parser.add_argument(
+        "--verification-config",
+        help="Optional controlled-verification config (default: main config).",
+    )
+    parser.add_argument(
+        "--generation-config",
+        help="Optional synthetic-generation config (default: method config).",
+    )
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -106,6 +129,124 @@ def _has_any(run_dir: Path, relative_paths: tuple[str, ...]) -> bool:
     return any((run_dir / path).exists() for path in relative_paths)
 
 
+def _is_no_certified_abstention(run_dir: Path) -> bool:
+    """Recognize only a complete, explicit, fail-closed verified-pool result."""
+    if not _complete(run_dir, SYNTHETIC_OUTPUTS):
+        return False
+    try:
+        manifest = read_json(run_dir / "synthetic" / "manifest.json")
+    except (OSError, ValueError):
+        return False
+    if not (
+        manifest.get("status") == NO_CERTIFIED_STATUS
+        and manifest.get("abstained") is True
+        and manifest.get("stage2_policy") == "failure_targeted_verified"
+        and manifest.get("certified_hypothesis_ids") == []
+        and manifest.get("counts") == {}
+        and manifest.get("abstention_reason") == NO_CERTIFIED_REASON
+    ):
+        return False
+    empty_jsonl_paths = (
+        run_dir / "synthetic" / "generated.jsonl",
+        run_dir / "synthetic" / "accepted.jsonl",
+        run_dir / "synthetic" / "rejected.jsonl",
+        run_dir / "teacher_calls" / "synthetic.jsonl",
+    )
+    try:
+        return all(
+            not read_jsonl(path, allow_empty=True) for path in empty_jsonl_paths
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def _archive_synthetic_attempt(run_dir: Path, reason: str) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = run_dir / "synthetic_attempts" / f"{timestamp}_{reason}"
+    suffix = 0
+    while destination.exists():
+        suffix += 1
+        destination = (
+            run_dir / "synthetic_attempts" / f"{timestamp}_{reason}_{suffix}"
+        )
+    destination.mkdir(parents=True)
+    synthetic_dir = run_dir / "synthetic"
+    if synthetic_dir.exists():
+        shutil.move(str(synthetic_dir), str(destination / "synthetic"))
+    teacher_log = run_dir / "teacher_calls" / "synthetic.jsonl"
+    if teacher_log.exists():
+        shutil.move(str(teacher_log), str(destination / "synthetic_teacher_calls.jsonl"))
+    completion_marker = run_dir / ".complete"
+    if completion_marker.exists():
+        shutil.move(str(completion_marker), str(destination / ".complete"))
+    print(
+        f"  [RECOVER] Archived synthetic attempt ({reason}) to {destination}",
+        flush=True,
+    )
+    return destination
+
+
+def _archive_verification_attempt(run_dir: Path, reason: str) -> Path:
+    """Preserve stale verification outputs before a prompt/config revision."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = run_dir / "verification_attempts" / f"{timestamp}_{reason}"
+    suffix = 0
+    while destination.exists():
+        suffix += 1
+        destination = (
+            run_dir / "verification_attempts" / f"{timestamp}_{reason}_{suffix}"
+        )
+    destination.mkdir(parents=True)
+    verification_dir = run_dir / "verification"
+    if verification_dir.exists():
+        shutil.move(str(verification_dir), str(destination / "verification"))
+    teacher_log = run_dir / "teacher_calls" / "verification.jsonl"
+    if teacher_log.exists():
+        shutil.move(
+            str(teacher_log), str(destination / "verification_teacher_calls.jsonl")
+        )
+    verification_config = run_dir / "stage2_configs" / "verification.yaml"
+    if verification_config.exists():
+        shutil.move(
+            str(verification_config), str(destination / "verification.yaml")
+        )
+    print(
+        f"  [RECOVER] Archived verification attempt ({reason}) to {destination}",
+        flush=True,
+    )
+    return destination
+
+
+def _archive_discovery_attempt(run_dir: Path, reason: str) -> Path:
+    """Preserve stale discovery outputs before changing its search profile."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    destination = run_dir / "discovery_attempts" / f"{timestamp}_{reason}"
+    suffix = 0
+    while destination.exists():
+        suffix += 1
+        destination = run_dir / "discovery_attempts" / f"{timestamp}_{reason}_{suffix}"
+    destination.mkdir(parents=True)
+    for relative_path in (
+        "hypotheses.json",
+        "hypothesis_evidence.json",
+        "hans_split_v2.json",
+    ):
+        source = run_dir / relative_path
+        if source.exists():
+            shutil.move(str(source), str(destination / source.name))
+    teacher_log = run_dir / "teacher_calls" / "discovery.jsonl"
+    if teacher_log.exists():
+        shutil.move(str(teacher_log), str(destination / "discovery_teacher_calls.jsonl"))
+    discovery_config = run_dir / "stage2_configs" / "discovery.yaml"
+    if discovery_config.exists():
+        shutil.move(str(discovery_config), str(destination / "discovery.yaml"))
+    print(
+        f"  [RECOVER] Archived discovery attempt ({reason}) to {destination}",
+        flush=True,
+    )
+    return destination
+
+
 def main() -> None:
     args = parse_args()
     benchmark_config = load_yaml_with_extends(args.benchmark_config)
@@ -149,29 +290,100 @@ def main() -> None:
     if frozen_roles != reconstructed_roles:
         raise ValueError("Synthetic pool split differs from the frozen Stage 2 manifest")
 
+    discovery_source = Path(args.discovery_config).resolve() if args.discovery_config else (
+        PROJECT_ROOT / "configs" / "main_hypothesis_discovery.yaml"
+    )
+    verification_source = Path(args.verification_config).resolve() if args.verification_config else (
+        PROJECT_ROOT / "configs" / "main_verification.yaml"
+    )
+    generation_source = Path(args.generation_config).resolve() if args.generation_config else (
+        PROJECT_ROOT / "configs" / POLICY_CONFIG[args.method]
+    )
     discovery = _seeded(
-        load_yaml_with_extends(PROJECT_ROOT / "configs" / "main_hypothesis_discovery.yaml"),
-        args.seed, hans, model,
+        load_yaml_with_extends(discovery_source), args.seed, hans, model
     )
     verification = _seeded(
-        load_yaml_with_extends(PROJECT_ROOT / "configs" / "main_verification.yaml"),
-        args.seed, hans, model,
+        load_yaml_with_extends(verification_source), args.seed, hans, model
     )
     generation = _seeded(
-        load_yaml_with_extends(PROJECT_ROOT / "configs" / POLICY_CONFIG[args.method]),
-        args.seed, hans, model,
+        load_yaml_with_extends(generation_source), args.seed, hans, model
     )
     configs = run_dir / "stage2_configs"
     discovery_path = configs / "discovery.yaml"
     verification_path = configs / "verification.yaml"
     generation_path = configs / "generation.yaml"
-    for path, value in (
-        (discovery_path, discovery),
-        (verification_path, verification),
-        (generation_path, generation),
+    discovery_config_changed = (
+        discovery_path.is_file()
+        and load_yaml_with_extends(discovery_path) != discovery
+    )
+    if args.method != "random_synthetic" and discovery_config_changed:
+        if (
+            (run_dir / "synthetic").exists()
+            or (run_dir / "teacher_calls" / "synthetic.jsonl").exists()
+            or (run_dir / ".complete").exists()
+        ):
+            _archive_synthetic_attempt(run_dir, "discovery_config_changed")
+        if args.method == "ours_verified" and (
+            (run_dir / "verification").exists()
+            or (run_dir / "teacher_calls" / "verification.jsonl").exists()
+        ):
+            _archive_verification_attempt(run_dir, "discovery_config_changed")
+        _archive_discovery_attempt(run_dir, "discovery_config_changed")
+    if not discovery_path.is_file() or discovery_config_changed:
+        _write_yaml(discovery_path, discovery)
+    verification_config_changed = (
+        verification_path.is_file()
+        and load_yaml_with_extends(verification_path) != verification
+    )
+    if args.method == "ours_verified" and verification_config_changed:
+        has_verification_attempt = (
+            (run_dir / "verification").exists()
+            or (run_dir / "teacher_calls" / "verification.jsonl").exists()
+        )
+        if has_verification_attempt:
+            _archive_verification_attempt(run_dir, "verification_config_changed")
+        if (
+            (run_dir / "synthetic").exists()
+            or (run_dir / "teacher_calls" / "synthetic.jsonl").exists()
+            or (run_dir / ".complete").exists()
+        ):
+            _archive_synthetic_attempt(run_dir, "verification_config_changed")
+    if not verification_path.is_file() or verification_config_changed:
+        _write_yaml(verification_path, verification)
+
+    required_accepted = max(int(item) for item in benchmark["budgets"])
+    configured_minimum = int(generation.get("stage2_min_accepted_examples", 0))
+    if configured_minimum < required_accepted:
+        raise ValueError(
+            "Synthetic generation must require at least the largest benchmark "
+            f"budget: configured={configured_minimum}, required={required_accepted}"
+        )
+    generation_config_changed = False
+    if generation_path.is_file():
+        generation_config_changed = (
+            load_yaml_with_extends(generation_path) != generation
+        )
+    accepted_path = run_dir / "synthetic" / "accepted.jsonl"
+    accepted_count = (
+        len(read_jsonl(accepted_path, allow_empty=True))
+        if accepted_path.is_file()
+        else None
+    )
+    if generation_config_changed and (run_dir / "synthetic").exists():
+        _archive_synthetic_attempt(run_dir, "generation_config_changed")
+    elif (
+        accepted_count is not None
+        and accepted_count < required_accepted
+        and not (
+            args.method == "ours_verified"
+            and _is_no_certified_abstention(run_dir)
+        )
     ):
-        if not path.is_file():
-            _write_yaml(path, value)
+        _archive_synthetic_attempt(
+            run_dir, f"insufficient_{accepted_count}_of_{required_accepted}"
+        )
+    if not generation_path.is_file() or generation_config_changed:
+        _write_yaml(generation_path, generation)
 
     if args.method == "random_synthetic":
         split_path = run_dir / "hans_split_v2.json"
@@ -216,14 +428,7 @@ def main() -> None:
                     stage="generating and verifying controlled probes",
                     overwrite=_has_any(run_dir, verification_outputs),
                 )
-    synthetic_outputs = (
-        "synthetic/generated.jsonl",
-        "synthetic/accepted.jsonl",
-        "synthetic/rejected.jsonl",
-        "synthetic/manifest.json",
-        "teacher_calls/synthetic.jsonl",
-    )
-    if _complete(run_dir, synthetic_outputs):
+    if _complete(run_dir, SYNTHETIC_OUTPUTS):
         print("  [SKIP] synthetic generation and QC already complete", flush=True)
     else:
         _run(
@@ -232,7 +437,24 @@ def main() -> None:
             run_dir,
             stage="generating and quality-checking synthetic training data",
         )
+    final_accepted = len(
+        read_jsonl(run_dir / "synthetic" / "accepted.jsonl", allow_empty=True)
+    )
+    no_certified_abstention = (
+        args.method == "ours_verified" and _is_no_certified_abstention(run_dir)
+    )
+    if final_accepted < required_accepted and not no_certified_abstention:
+        raise ValueError(
+            "Synthetic pool is too small for the benchmark: "
+            f"accepted={final_accepted}, required={required_accepted}"
+        )
     (run_dir / ".complete").touch()
+    if no_certified_abstention:
+        print(
+            "  [ABSTAIN] No hypotheses were certified; recorded an empty "
+            "fail-closed acquisition pool",
+            flush=True,
+        )
     print(f"Wrote Stage 2 acquisition pool to {run_dir}")
 
 

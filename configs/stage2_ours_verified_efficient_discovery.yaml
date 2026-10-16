@@ -1,0 +1,6 @@
+extends: main_hypothesis_discovery.yaml
+
+# A focused one-shot search: keep only the three strongest pre-registered
+# hypotheses so controlled verification is substantially cheaper.
+hypothesis_generation:
+  max_hypotheses: 3

@@ -1,4 +1,6 @@
 extends: main_synthetic_generation.yaml
 stage2_policy: failure_targeted_verified
 stage2_generation_limit_examples: 320
+stage2_min_accepted_examples: 128
+stage2_max_generated_examples: 1280
 

@@ -8,7 +8,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
+from src.teacher.base import (
+    TeacherCall,
+    TeacherLLM,
+    teacher_exchange_log,
+    teacher_failure_log,
+)
 from tqdm.auto import tqdm
 
 
@@ -19,6 +24,7 @@ _SCORER_INPUT_FIELDS = ("id", "premise", "hypothesis", "prediction", "confidence
 @dataclass(frozen=True)
 class ErrorScoringConfig:
     max_records_per_call: int = 40
+    max_attempts_per_batch: int = 3
     seed: int = 42
     prompt_version: str = ERROR_SCORING_PROMPT_VERSION
     source: str = "teacher_llm_critic"
@@ -26,6 +32,8 @@ class ErrorScoringConfig:
     def __post_init__(self) -> None:
         if self.max_records_per_call <= 0:
             raise ValueError("max_records_per_call must be positive")
+        if self.max_attempts_per_batch <= 0:
+            raise ValueError("max_attempts_per_batch must be positive")
         if not self.prompt_version.strip() or not self.source.strip():
             raise ValueError("Error scorer prompt_version and source must be non-empty")
 
@@ -128,55 +136,118 @@ class TeacherErrorProbabilityScorer:
                 },
                 "records": batch,
             }
-            derived_seed = int.from_bytes(
+            initial_seed = int.from_bytes(
                 hashlib.sha256(
                     f"{self.config.seed}:error-scorer:{batch_index}".encode("utf-8")
                 ).digest()[:4],
                 "big",
             )
-            call = TeacherCall(
-                task="discovery_error_probability_scoring",
-                prompt_version=self.config.prompt_version,
-                seed=derived_seed,
-                system_prompt=system_prompt,
-                payload=payload,
-            )
-            response = self.teacher.generate_json(call)
-            if set(response) != {"scores"} or not isinstance(response["scores"], list):
-                raise ValueError("Error scorer response must contain only scores[]")
             expected_ids = {str(record["id"]) for record in batch}
-            returned_ids: set[str] = set()
-            for raw in response["scores"]:
-                if not isinstance(raw, dict) or set(raw) != {
-                    "example_id",
-                    "error_probability",
-                    "rationale",
-                }:
-                    raise ValueError("Error scorer item violates its declared schema")
-                example_id = str(raw["example_id"])
-                probability = raw["error_probability"]
-                if example_id in returned_ids or example_id not in expected_ids:
-                    raise ValueError("Error scorer returned an unknown or duplicate ID")
-                if isinstance(probability, bool) or not isinstance(
-                    probability, (int, float)
-                ):
-                    raise ValueError("Error probability must be numeric")
-                probability = float(probability)
-                if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
-                    raise ValueError("Error probability must be finite and in [0, 1]")
-                if not isinstance(raw["rationale"], str):
-                    raise ValueError("Error-score rationale must be a string")
-                returned_ids.add(example_id)
-                scores[example_id] = probability
-            if returned_ids != expected_ids:
-                raise ValueError("Error scorer must return exactly one score per input ID")
-            logs.append(
-                {
-                    "scoring_method": self.method,
-                    "scoring_source": self.config.source,
-                    **teacher_exchange_log(self.teacher, call, response),
-                }
-            )
+            last_error: ValueError | None = None
+            for attempt in range(self.config.max_attempts_per_batch):
+                attempt_payload = dict(payload)
+                if last_error is not None:
+                    attempt_payload["retry_correction"] = {
+                        "previous_response_rejected_because": str(last_error),
+                        "mandatory_instruction": (
+                            "Return exactly one score for every supplied example ID, "
+                            "no unknown or duplicate IDs, and valid standalone JSON. "
+                            "Keep every rationale to one sentence of at most 12 words "
+                            "so the complete JSON object fits the output limit."
+                        ),
+                    }
+                if attempt == 0:
+                    # Preserve existing request IDs so completed cached batches remain
+                    # reusable when this retry behavior is introduced mid-run.
+                    derived_seed = initial_seed
+                else:
+                    derived_seed = int.from_bytes(
+                        hashlib.sha256(
+                            f"{self.config.seed}:error-scorer:{batch_index}:"
+                            f"attempt:{attempt}".encode("utf-8")
+                        ).digest()[:4],
+                        "big",
+                    )
+                call = TeacherCall(
+                    task="discovery_error_probability_scoring",
+                    prompt_version=self.config.prompt_version,
+                    seed=derived_seed,
+                    system_prompt=system_prompt,
+                    payload=attempt_payload,
+                )
+                response: dict[str, Any] | None = None
+                try:
+                    response = self.teacher.generate_json(call)
+                    if set(response) != {"scores"} or not isinstance(
+                        response["scores"], list
+                    ):
+                        raise ValueError(
+                            "Error scorer response must contain only scores[]"
+                        )
+                    batch_scores: dict[str, float] = {}
+                    for raw in response["scores"]:
+                        if not isinstance(raw, dict) or set(raw) != {
+                            "example_id",
+                            "error_probability",
+                            "rationale",
+                        }:
+                            raise ValueError(
+                                "Error scorer item violates its declared schema"
+                            )
+                        example_id = str(raw["example_id"])
+                        probability = raw["error_probability"]
+                        if example_id in batch_scores or example_id not in expected_ids:
+                            raise ValueError(
+                                "Error scorer returned an unknown or duplicate ID"
+                            )
+                        if isinstance(probability, bool) or not isinstance(
+                            probability, (int, float)
+                        ):
+                            raise ValueError("Error probability must be numeric")
+                        probability = float(probability)
+                        if (
+                            not math.isfinite(probability)
+                            or not 0.0 <= probability <= 1.0
+                        ):
+                            raise ValueError(
+                                "Error probability must be finite and in [0, 1]"
+                            )
+                        if not isinstance(raw["rationale"], str):
+                            raise ValueError("Error-score rationale must be a string")
+                        batch_scores[example_id] = probability
+                    if set(batch_scores) != expected_ids:
+                        raise ValueError(
+                            "Error scorer must return exactly one score per input ID"
+                        )
+                except ValueError as exc:
+                    logs.append(
+                        {
+                            "scoring_method": self.method,
+                            "scoring_source": self.config.source,
+                            **teacher_failure_log(self.teacher, call, exc, response),
+                        }
+                    )
+                    last_error = exc
+                    if attempt + 1 == self.config.max_attempts_per_batch:
+                        raise ValueError(
+                            "Error-scoring teacher batch remained invalid after "
+                            f"{self.config.max_attempts_per_batch} attempts"
+                        ) from exc
+                    tqdm.write(
+                        f"Retrying discovery error-scoring batch {batch_index} after "
+                        f"invalid teacher response ({attempt + 1}/"
+                        f"{self.config.max_attempts_per_batch}): {exc}"
+                    )
+                    continue
+                scores.update(batch_scores)
+                logs.append(
+                    {
+                        "scoring_method": self.method,
+                        "scoring_source": self.config.source,
+                        **teacher_exchange_log(self.teacher, call, response),
+                    }
+                )
+                break
         if set(scores) != set(ids):
             raise ValueError("Error scorer did not score the complete discovery pool")
         return ErrorScoreBatch(

@@ -12,3 +12,4 @@ test_*
 !tests/test_multiround.py
 !tests/test_stage2_benchmark.py
 !tests/test_report_hans_baselines.py
+!tests/test_verification_probes.py

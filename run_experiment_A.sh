@@ -142,6 +142,12 @@ build_synthetic_pools() {
   echo "[PHASE 1/3] Building synthetic acquisition pools sequentially"
   local pool_index=0
   local pool_total=$((${#SYNTHETIC_METHODS[@]} * ${#SEEDS[@]}))
+  local required_accepted=0
+  for budget in "${BUDGETS[@]}"; do
+    if ((budget > required_accepted)); then
+      required_accepted="$budget"
+    fi
+  done
   for method in "${SYNTHETIC_METHODS[@]}"; do
     for seed in "${SEEDS[@]}"; do
       pool_index=$((pool_index + 1))
@@ -149,8 +155,21 @@ build_synthetic_pools() {
       local accepted="$output/synthetic/accepted.jsonl"
       local manifest="$output/synthetic/manifest.json"
       if [[ -f "$accepted" && -f "$manifest" ]]; then
-        echo "[POOL $pool_index/$pool_total][SKIP] Complete: method=$method seed=$seed"
-        continue
+        local pool_status
+        pool_status="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", "complete"))' "$manifest")"
+        if [[ "$method" == "ours_verified" && \
+              "$pool_status" == "abstained_no_certified_hypotheses" && \
+              -f "$output/.complete" ]]; then
+          echo "[POOL $pool_index/$pool_total][SKIP][ABSTAINED] method=$method seed=$seed reason=no_certified_hypotheses"
+          continue
+        fi
+        local accepted_count
+        accepted_count="$(wc -l < "$accepted")"
+        if ((accepted_count >= required_accepted)); then
+          echo "[POOL $pool_index/$pool_total][SKIP] Complete: method=$method seed=$seed accepted=$accepted_count"
+          continue
+        fi
+        echo "[POOL $pool_index/$pool_total][REBUILD] Insufficient accepted data: method=$method seed=$seed accepted=$accepted_count required=$required_accepted"
       fi
       echo "[POOL $pool_index/$pool_total] method=$method seed=$seed"
       python scripts/build_stage2_synthetic_pool.py \

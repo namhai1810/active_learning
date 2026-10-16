@@ -17,5 +17,6 @@ hypothesis_generation:
     type: teacher_llm
     source: teacher_llm_critic
     max_records_per_call: 40
+    max_attempts_per_batch: 3
     seed: 42
     prompt_version: discovery_error_probability_v1

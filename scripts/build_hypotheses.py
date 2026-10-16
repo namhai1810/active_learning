@@ -96,6 +96,9 @@ def main() -> None:
             max_records_per_call=int(
                 scorer_config_value.get("max_records_per_call", 40)
             ),
+            max_attempts_per_batch=int(
+                scorer_config_value.get("max_attempts_per_batch", 3)
+            ),
             seed=int(scorer_config_value.get("seed", discovery_config.seed)),
             prompt_version=str(
                 scorer_config_value.get(

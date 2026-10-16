@@ -102,13 +102,16 @@ def main() -> None:
         max_probe_sets_per_call=int(
             verification.get("max_probe_sets_per_call", 8)
         ),
+        max_attempts_per_batch=int(
+            verification.get("max_attempts_per_batch", 3)
+        ),
         near_duplicate_threshold=float(
             verification.get("near_duplicate_threshold", 0.92)
         ),
         seed=int(verification.get("seed", 42)),
         prompt_version=str(
             verification.get(
-                "probe_prompt_version", "controlled_verification_probes_v1"
+                "probe_prompt_version", "controlled_verification_probes_v3"
             )
         ),
     )
@@ -123,6 +126,9 @@ def main() -> None:
         ),
         max_probe_sets_per_call=int(
             verification.get("validation_max_probe_sets_per_call", 8)
+        ),
+        max_attempts_per_batch=int(
+            verification.get("validation_max_attempts_per_batch", 3)
         ),
     )
     delta = float(verification["delta"])

@@ -17,6 +17,7 @@ from src.decision.cost_aware import select_intervention
 from src.decision.types import DecisionCandidate
 from src.evaluation.metrics import compute_hans_metrics
 from src.synthetic.types import SyntheticNLIExample
+from scripts.run_stage2_benchmark import _synthetic_pool
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +93,39 @@ def test_complete_pair_budget_and_shortage_are_explicit_across_rounds():
     }
     assert not {item.id for item in first} & {item.id for item in second}
     assert first_status["shortage"] is False
+
+
+def test_only_well_formed_verified_abstention_may_have_an_empty_pool(tmp_path):
+    accepted = tmp_path / "accepted.jsonl"
+    manifest = tmp_path / "manifest.json"
+    accepted.write_text("", encoding="utf-8")
+    payload = {
+        "stage2_policy": "failure_targeted_verified",
+        "status": "abstained_no_certified_hypotheses",
+        "abstention_reason": "no_certified_hypotheses",
+        "binary_hans_labels_converted": False,
+        "pair_selection_unit": "complete_pair",
+        "certified_hypothesis_ids": [],
+        "counts": {},
+    }
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    benchmark = {
+        "synthetic_artifacts": {
+            "ours_verified": {
+                "accepted": str(accepted),
+                "provenance": str(manifest),
+            }
+        }
+    }
+
+    pool, provenance = _synthetic_pool(benchmark, "ours_verified", 42)
+
+    assert pool == []
+    assert provenance["status"] == "abstained_no_certified_hypotheses"
+    payload["certified_hypothesis_ids"] = ["h1"]
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="empty pool"):
+        _synthetic_pool(benchmark, "ours_verified", 42)
 
 
 def test_final_test_overlap_audit_is_post_selection_and_does_not_veto():
@@ -265,6 +299,28 @@ def test_stage2_report_generates_visualizations(tmp_path):
     (run / "posthoc_gain_eval_curve.json").write_text(
         json.dumps(curve), encoding="utf-8"
     )
+    abstained_run = (
+        tmp_path / "runs" / "ours_verified" / "budget_128" / "seed_42"
+    )
+    abstained_run.mkdir(parents=True)
+    abstained_result = {
+        **result,
+        "method": "ours_verified",
+        "requested_budget": 128,
+        "actual_final_training_examples": 0,
+        "shortage": True,
+        "abstained": True,
+        "run_status": "abstained_no_certified_hypotheses",
+        "abstention_reason": "no_certified_hypotheses",
+        "fixed_budget_comparable": False,
+        "hans_final": {
+            **result["hans_final"],
+            "overall_accuracy": 0.99,
+        },
+    }
+    (abstained_run / "result.json").write_text(
+        json.dumps(abstained_result), encoding="utf-8"
+    )
     report = tmp_path / "report"
     subprocess.run(
         [
@@ -286,3 +342,16 @@ def test_stage2_report_generates_visualizations(tmp_path):
     assert (report / "figures" / "experiment_a_final_hans_accuracy.svg").is_file()
     assert (report / "figures" / "experiment_a_gain_eval_learning_curve.svg").is_file()
     assert (report / "figures" / "experiment_a_accuracy_vs_cost.svg").is_file()
+    summary = json.loads((report / "stage2_summary.json").read_text())
+    abstained_group = next(
+        item for item in summary["groups"] if item["method"] == "ours_verified"
+    )
+    assert abstained_group["any_abstained"] is True
+    assert abstained_group["comparable_seeds"] == []
+    assert abstained_group["hans_final.overall_accuracy"]["n"] == 0
+    assert abstained_group["hans_final.overall_accuracy"]["mean"] is None
+    assert abstained_group["actual_final_training_examples"]["mean"] == 0
+    assert "ABSTAINED" in (report / "STAGE2_REPORT.md").read_text()
+    assert "ours_verified · budget 128" not in (
+        report / "figures" / "experiment_a_final_hans_accuracy.svg"
+    ).read_text()

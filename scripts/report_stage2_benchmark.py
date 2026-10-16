@@ -107,6 +107,8 @@ def _write_final_accuracy_figure(
     rows = [
         row for row in summaries
         if row["experiment"] == "A"
+        and not row.get("any_abstained", False)
+        and not row.get("any_shortage", False)
         and row["hans_final.overall_accuracy"]["mean"] is not None
     ]
     rows.sort(
@@ -239,6 +241,8 @@ def _write_cost_accuracy_figure(
     rows = [
         row for row in summaries
         if row["experiment"] == "A"
+        and not row.get("any_abstained", False)
+        and not row.get("any_shortage", False)
         and row["hans_final.overall_accuracy"]["mean"] is not None
         and row["assumed_cost.total"]["mean"] is not None
     ]
@@ -316,6 +320,17 @@ def main() -> None:
             f"No Stage 2 result.json files beneath {root} match the requested filters"
         )
     results = [result for _, result in result_entries]
+    for result in results:
+        if not bool(result.get("abstained", False)):
+            continue
+        if (
+            result.get("run_status") != "abstained_no_certified_hypotheses"
+            or result.get("abstention_reason") != "no_certified_hypotheses"
+            or int(result.get("actual_final_training_examples", -1)) != 0
+            or result.get("shortage") is not True
+            or result.get("fixed_budget_comparable") is not False
+        ):
+            raise ValueError("Malformed Stage 2 certification-abstention result")
     hashes = {result.get("manifest_hash") for result in results}
     if len(hashes) != 1 or None in hashes:
         raise ValueError("All Stage 2 runs must use exactly one frozen manifest hash")
@@ -358,6 +373,14 @@ def main() -> None:
     )
     summaries: list[dict[str, Any]] = []
     for (experiment, method, budget), group in sorted(grouped.items()):
+        abstained_seeds = sorted(
+            int(item["seed"]) for item in group if bool(item.get("abstained", False))
+        )
+        comparable_seeds = sorted(
+            int(item["seed"])
+            for item in group
+            if bool(item.get("fixed_budget_comparable", True))
+        )
         row: dict[str, Any] = {
             "experiment": experiment,
             "method": method,
@@ -365,14 +388,31 @@ def main() -> None:
             "seeds": sorted(int(item["seed"]) for item in group),
             "cross_source_baseline": group[0]["cross_source_baseline"],
             "any_shortage": any(bool(item["shortage"]) for item in group),
+            "any_abstained": bool(abstained_seeds),
+            "abstained_seeds": abstained_seeds,
+            "comparable_seeds": comparable_seeds,
+            "all_fixed_budget_comparable": len(comparable_seeds) == len(group),
             "any_leakage_audit_failure": any(
                 not bool(item.get("leakage_audit", {}).get("passed", False))
                 for item in group
             ),
         }
         for path in metric_paths:
+            metric_group = (
+                [
+                    item
+                    for item in group
+                    if bool(item.get("fixed_budget_comparable", True))
+                ]
+                if path.startswith(("hans_final.", "mnli."))
+                else group
+            )
             row[path] = _summary(
-                [value for item in group if (value := _metric(item, path)) is not None]
+                [
+                    value
+                    for item in metric_group
+                    if (value := _metric(item, path)) is not None
+                ]
             )
         summaries.append(row)
 
@@ -380,6 +420,8 @@ def main() -> None:
         tuple[str, str, int, int, int], list[dict[str, Any]]
     ] = defaultdict(list)
     for result_path, result in result_entries:
+        if not bool(result.get("fixed_budget_comparable", True)):
+            continue
         curve_name = str(result.get("learning_curve_file", ""))
         if not curve_name:
             raise ValueError(f"Run has no learning curve reference: {result_path}")
@@ -440,7 +482,9 @@ def main() -> None:
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         fields = [
             "experiment", "method", "budget", "seeds",
-            "cross_source_baseline", "any_shortage",
+            "cross_source_baseline", "any_shortage", "any_abstained",
+            "abstained_seeds", "comparable_seeds",
+            "all_fixed_budget_comparable",
             "any_leakage_audit_failure",
         ]
         for path in metric_paths:
@@ -448,8 +492,14 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for item in summaries:
-            flat: dict[str, Any] = {key: item[key] for key in fields[:7]}
+            flat: dict[str, Any] = {key: item[key] for key in fields[:11]}
             flat["seeds"] = ",".join(map(str, item["seeds"]))
+            flat["abstained_seeds"] = ",".join(
+                map(str, item["abstained_seeds"])
+            )
+            flat["comparable_seeds"] = ",".join(
+                map(str, item["comparable_seeds"])
+            )
             for path in metric_paths:
                 flat[f"{path}.mean"] = item[path]["mean"]
                 flat[f"{path}.std"] = item[path]["std"]
@@ -513,6 +563,9 @@ def main() -> None:
         "no-verification ablation use pairs for selection but train with per-example "
         "cross-entropy. Ours uses token cross-entropy plus counterfactual contrastive "
         "and invariant consistency losses.",
+        "Runs that abstain because no failure hypothesis is certified are retained "
+        "as protocol outcomes and costs, but are excluded from equal-budget "
+        "accuracy figures and learning-curve comparisons.",
         "",
         "![Experiment A final HANS accuracy](figures/experiment_a_final_hans_accuracy.svg)",
         "",
@@ -520,8 +573,8 @@ def main() -> None:
         "",
         "![Experiment A accuracy versus cost](figures/experiment_a_accuracy_vs_cost.svg)",
         "",
-        "| Exp. | Method | Budget | Seeds | HANS acc. | HANS non-ent. | MNLI m/mm | Actual train | Assumed cost | Shortage | Leakage audit |",
-        "|---|---|---:|---|---:|---:|---:|---:|---:|---|---|",
+        "| Exp. | Method | Budget | Seeds | Status | HANS acc. | HANS non-ent. | MNLI m/mm | Actual train | Assumed cost | Shortage | Leakage audit |",
+        "|---|---|---:|---|---|---:|---:|---:|---:|---:|---|---|",
     ]
     def fmt(summary: dict[str, Any]) -> str:
         if summary["mean"] is None:
@@ -529,9 +582,14 @@ def main() -> None:
         return f"{summary['mean']:.4f} ± {summary['std']:.4f}"
     for item in summaries:
         lines.append(
-            "| {experiment} | {method} | {budget} | {seeds} | {hans} | {nonent} | {matched} / {mismatch} | {actual} | {cost} | {shortage} | {leakage} |".format(
+            "| {experiment} | {method} | {budget} | {seeds} | {status} | {hans} | {nonent} | {matched} / {mismatch} | {actual} | {cost} | {shortage} | {leakage} |".format(
                 experiment=item["experiment"], method=item["method"], budget=item["budget"],
                 seeds=",".join(map(str, item["seeds"])),
+                status=(
+                    "ABSTAINED"
+                    if item["any_abstained"]
+                    else "complete"
+                ),
                 hans=fmt(item["hans_final.overall_accuracy"]),
                 nonent=fmt(item["hans_final.non_entailment_accuracy"]),
                 matched=fmt(item["mnli.matched.accuracy"]),

@@ -153,6 +153,21 @@ def _synthetic_pool(
         raise ValueError("Synthetic benchmark artifacts must use explicit MNLI labels")
     if provenance.get("pair_selection_unit") != "complete_pair":
         raise ValueError("Synthetic benchmark artifacts must preserve complete pairs")
+    abstained = provenance.get("status") == "abstained_no_certified_hypotheses"
+    if abstained:
+        if method != "ours_verified":
+            raise ValueError(
+                "Only ours_verified may abstain because no hypothesis was certified"
+            )
+        if (
+            rows
+            or provenance.get("certified_hypothesis_ids") != []
+            or provenance.get("abstention_reason") != "no_certified_hypotheses"
+        ):
+            raise ValueError(
+                "A no-certified-hypotheses abstention must have an empty pool and "
+                "no certified hypothesis IDs"
+            )
     teacher_input_tokens = 0
     teacher_output_tokens = 0
     calls_value = value.get("teacher_calls_dir")
@@ -249,6 +264,12 @@ def main() -> None:
     elif args.method not in {"zero_shot"}:
         synthetic_pool, provenance = _synthetic_pool(benchmark, args.method, args.seed)
 
+    verified_abstention = bool(
+        args.method == "ours_verified"
+        and isinstance(provenance, dict)
+        and provenance.get("status") == "abstained_no_certified_hypotheses"
+    )
+
     current_adapter = model.get("adapter_path")
     initial_checkpoint = checkpoint_descriptor(model)
     selected_ids: list[str] = []
@@ -298,6 +319,13 @@ def main() -> None:
                 seed=args.seed + round_index - 1,
                 excluded_ids=selected_ids,
             )
+            if shortage.get("shortage") and not verified_abstention:
+                raise ValueError(
+                    "Synthetic pool cannot satisfy the requested complete-pair "
+                    f"budget for {args.method}: requested={requested}, "
+                    f"actual={len(acquired_synthetic)}. Rebuild the pool before "
+                    "running the benchmark."
+                )
             acquired_mnli = [item.to_mnli() for item in acquired_synthetic]
         acquisition_gpu_seconds = float(
             _stop_gpu_timer(student, acquisition_timer) or 0.0
@@ -576,11 +604,28 @@ def main() -> None:
         "requested_budget": args.budget,
         "actual_final_training_examples": len(selected_ids),
         "shortage": False if args.method == "zero_shot" else len(selected_ids) < args.budget,
+        "abstained": verified_abstention,
+        "run_status": (
+            "abstained_no_certified_hypotheses"
+            if verified_abstention
+            else "complete"
+        ),
+        "abstention_reason": (
+            provenance.get("abstention_reason")
+            if verified_abstention and isinstance(provenance, dict)
+            else None
+        ),
+        "fixed_budget_comparable": (
+            args.method == "zero_shot"
+            or (not verified_abstention and len(selected_ids) == args.budget)
+        ),
         "rounds": args.rounds,
         "cross_source_baseline": args.method in {"random_mnli", "uncertainty_mnli"},
         "equal_data_access_claimed": False,
         "training_objective": (
-            "none"
+            "none_abstained"
+            if verified_abstention
+            else "none"
             if args.method == "zero_shot"
             else (
                 "token_cross_entropy_plus_counterfactual_contrastive_"
@@ -589,7 +634,9 @@ def main() -> None:
                 else "per_example_causal_lm_cross_entropy"
             )
         ),
-        "pair_structure_used_for_training": args.method == "ours_verified",
+        "pair_structure_used_for_training": (
+            args.method == "ours_verified" and not verified_abstention
+        ),
         "pair_structure_used_only_for_selection": args.method in {
             "random_synthetic", "failure_driven_no_verification"
         },
