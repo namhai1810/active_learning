@@ -416,6 +416,7 @@ def main() -> None:
                 "verification/rejected_probes.jsonl",
                 "verification/probe_set_outcomes.jsonl",
                 "verification/results.json",
+                "verification/REPORT.md",
                 "teacher_calls/verification.jsonl",
             )
             if _complete(run_dir, verification_outputs):

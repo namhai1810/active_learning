@@ -92,6 +92,30 @@ def _certified_ids(payload: dict[str, Any]) -> list[str]:
     return result
 
 
+def _verification_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep the certification decision and diagnostics with training provenance."""
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, list):
+        raise ValueError("Verification results must be a list")
+    return {
+        "verification_protocol_version": payload.get(
+            "verification_protocol_version", "legacy_strict_joint"
+        ),
+        "certification_metric": payload.get(
+            "certification_metric", "strict_joint"
+        ),
+        "controls_role": payload.get("controls_role", "certification_gate"),
+        "delta": payload.get("delta"),
+        "tau_v": payload.get("tau_v"),
+        "K": payload.get("K"),
+        "T": payload.get("T"),
+        "configured_max_rounds": payload.get("configured_max_rounds"),
+        "adaptive_verification": payload.get("adaptive_verification", False),
+        "adaptive_look_schedule": payload.get("adaptive_look_schedule"),
+        "results": [dict(item) for item in raw_results if isinstance(item, dict)],
+    }
+
+
 def _synthetic_manifest(
     *,
     stage2_policy: str,
@@ -107,6 +131,7 @@ def _synthetic_manifest(
     quality_max_attempts_per_batch: int,
     generation_rounds: list[dict[str, Any]],
     counts: dict[str, dict[str, int]],
+    verification_summary: dict[str, Any] | None = None,
     abstained: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -170,6 +195,8 @@ def _synthetic_manifest(
         ],
         "counts": counts,
     }
+    if verification_summary is not None:
+        payload["verification_summary"] = verification_summary
     if abstained:
         payload.update(
             {
@@ -304,6 +331,7 @@ def main() -> None:
         hypotheses = {random_hypothesis.id: random_hypothesis}
         certified = [random_hypothesis.id]
         verification_payload = None
+        verification_summary = None
     else:
         hypotheses = _load_candidates(read_json(required["hypotheses"]))
         if stage2_policy == "failure_targeted_verified":
@@ -311,8 +339,10 @@ def main() -> None:
             if verification_payload.get("split_version") != HANS_FIVE_WAY_SPLIT_VERSION:
                 raise ValueError("Verification used an incompatible split manifest")
             certified = _certified_ids(verification_payload)
+            verification_summary = _verification_summary(verification_payload)
         else:
             verification_payload = None
+            verification_summary = None
             certified = list(hypotheses)
         unknown = sorted(set(certified) - set(hypotheses))
         if unknown:
@@ -370,6 +400,7 @@ def main() -> None:
                 quality_max_attempts_per_batch=quality_max_attempts_per_batch,
                 generation_rounds=[],
                 counts={},
+                verification_summary=verification_summary,
                 abstained=True,
             ),
         )
@@ -601,6 +632,7 @@ def main() -> None:
             quality_max_attempts_per_batch=quality_max_attempts_per_batch,
             generation_rounds=generation_rounds,
             counts=counts,
+            verification_summary=verification_summary,
         ),
     )
     print(f"Wrote validated synthetic artifacts to {output_dir}")

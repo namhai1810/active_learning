@@ -52,6 +52,7 @@ def main() -> None:
     teacher_config = require_mapping(config, "teacher")
     discovery_config = LLMDiscoveryConfig(
         max_hypotheses=int(generation.get("max_hypotheses", 5)),
+        min_hypotheses=int(generation.get("min_hypotheses", 1)),
         max_error_examples=int(generation.get("max_error_examples", 80)),
         max_contrast_examples=int(generation.get("max_contrast_examples", 20)),
         sampling_strategy=str(generation.get("sampling_strategy", "exponential")),
@@ -61,6 +62,11 @@ def main() -> None:
         contrast_sampling_strategy=str(
             generation.get("contrast_sampling_strategy", "highest_error_score")
         ),
+        diversity_sampling=bool(generation.get("diversity_sampling", False)),
+        max_candidate_token_jaccard=float(
+            generation.get("max_candidate_token_jaccard", 1.0)
+        ),
+        max_attempts_per_call=int(generation.get("max_attempts_per_call", 3)),
         seed=int(generation.get("seed", 42)),
         prompt_version=str(generation.get("prompt_version", "failure_discovery_v1")),
     )

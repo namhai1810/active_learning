@@ -647,8 +647,19 @@ class ControlledVerificationProbeGenerator:
         self,
         hypothesis: FailureHypothesis,
         verification_context: Sequence[Mapping[str, Any]],
+        *,
+        ordinal_start: int = 0,
+        avoid_probes: Sequence[VerificationProbe] = (),
     ) -> tuple[list[VerificationProbe], dict[str, Any]]:
         hypothesis.validate(require_llm_schema=True)
+        if isinstance(ordinal_start, bool) or not isinstance(ordinal_start, int) or ordinal_start < 0:
+            raise ValueError("ordinal_start must be a non-negative integer")
+        generation_start_ordinal = ordinal_start
+        prior_probes = list(avoid_probes)
+        if any(probe.hypothesis_id != hypothesis.id for probe in prior_probes):
+            raise ValueError("avoid_probes must belong to the tested hypothesis")
+        if len({probe.id for probe in prior_probes}) != len(prior_probes):
+            raise ValueError("avoid_probes IDs must be unique")
         context = [_sanitize_context(record) for record in verification_context]
         ids = [str(record["id"]) for record in context]
         if len(ids) != len(set(ids)):
@@ -693,7 +704,12 @@ class ControlledVerificationProbeGenerator:
         generated: list[VerificationProbe] = []
         logs: list[dict[str, Any]] = []
         remaining = self.config.n_probe_sets
-        batch_index = 0
+        batch_index = ordinal_start
+        next_set_ordinal = ordinal_start
+        failed_probe_sets = 0
+        max_failed_probe_sets = (
+            self.config.n_probe_sets - self.config.min_valid_probe_sets
+        )
         adaptive_max_probe_sets = self.config.max_probe_sets_per_call
         progress = tqdm(
             total=self.config.n_probe_sets,
@@ -704,7 +720,7 @@ class ControlledVerificationProbeGenerator:
         )
         while remaining:
             requested = min(remaining, adaptive_max_probe_sets)
-            ordinal_start = len(generated) // len(PROBE_TYPES)
+            ordinal_start = next_set_ordinal
             context_window_size = min(2, len(selected_context))
             context_start = (
                 batch_index * context_window_size
@@ -840,7 +856,7 @@ class ControlledVerificationProbeGenerator:
             for attempt in range(self.config.max_attempts_per_batch):
                 attempt_payload = dict(payload)
                 if last_error is not None:
-                    attempt_payload["retry_correction"] = {
+                    retry_correction: dict[str, Any] = {
                         "previous_response_rejected_because": str(last_error),
                         "mandatory_instruction": (
                             "Return exactly one top-level key named probe_sets, with "
@@ -863,6 +879,45 @@ class ControlledVerificationProbeGenerator:
                             "expected_failure_label only for the target."
                         ),
                     }
+                    duplicate_source = str(last_error).rsplit(": ", 1)[-1]
+                    duplicate_probe = next(
+                        (
+                            probe
+                            for probe in (*prior_probes, *generated)
+                            if probe.id == duplicate_source
+                        ),
+                        None,
+                    )
+                    if duplicate_probe is not None:
+                        retry_correction["duplicate_avoidance_instruction"] = (
+                            "Change both the event wording and syntactic construction; "
+                            "do not lightly paraphrase this forbidden pair."
+                        )
+                        retry_correction["forbidden_near_duplicate_pair"] = {
+                            "premise": duplicate_probe.premise,
+                            "hypothesis": duplicate_probe.hypothesis,
+                        }
+                    elif duplicate_source.startswith("verification_context:"):
+                        context_id = duplicate_source.split(":", 1)[1]
+                        duplicate_context = next(
+                            (
+                                record
+                                for record in context
+                                if str(record["id"]) == context_id
+                            ),
+                            None,
+                        )
+                        if duplicate_context is not None:
+                            retry_correction["duplicate_avoidance_instruction"] = (
+                                "Change both the event wording and syntactic "
+                                "construction; do not lightly paraphrase this "
+                                "forbidden pair."
+                            )
+                            retry_correction["forbidden_near_duplicate_pair"] = {
+                                "premise": str(duplicate_context["premise"]),
+                                "hypothesis": str(duplicate_context["hypothesis"]),
+                            }
+                    attempt_payload["retry_correction"] = retry_correction
                 if attempt == 0:
                     # Keep existing request IDs so a cached invalid response is
                     # observed, logged, and then corrected by a distinct retry call.
@@ -906,7 +961,7 @@ class ControlledVerificationProbeGenerator:
                                 _normalized_pair_text(
                                     probe.premise, probe.hypothesis
                                 ): probe.id
-                                for probe in generated
+                                for probe in (*prior_probes, *generated)
                             }
                             if self.config.prompt_version
                             == PRE_QC_INDEPENDENCE_PROMPT_VERSION
@@ -949,15 +1004,41 @@ class ControlledVerificationProbeGenerator:
                         f"{adaptive_max_probe_sets} probe set(s)."
                     )
                     continue
-                progress.close()
-                raise ValueError(
-                    "Verification probe generation for one probe set remained invalid "
-                    f"after {self.config.max_attempts_per_batch} attempts"
-                ) from exhausted_error
+                failed_probe_sets += 1
+                if failed_probe_sets > max_failed_probe_sets:
+                    progress.close()
+                    raise ValueError(
+                        "Verification probe generation failures leave fewer than "
+                        f"min_valid_probe_sets={self.config.min_valid_probe_sets} "
+                        "possible before independent QC"
+                    ) from exhausted_error
+                logs.append(
+                    {
+                        "verification_substage": "generation_set_abstention",
+                        "hypothesis_id": hypothesis.id,
+                        "set_ordinal": ordinal_start,
+                        "attempts": self.config.max_attempts_per_batch,
+                        "reason": str(exhausted_error),
+                    }
+                )
+                tqdm.write(
+                    f"Skipping invalid verification set ordinal {ordinal_start} for "
+                    f"{hypothesis.id}; {failed_probe_sets}/"
+                    f"{max_failed_probe_sets} pre-QC failures used."
+                )
+                remaining -= 1
+                next_set_ordinal += 1
+                batch_index += 1
+                progress.update(1)
+                progress.set_postfix(
+                    call=batch_index, skipped=failed_probe_sets, refresh=False
+                )
+                continue
             if batch_generated is None:
                 progress.close()
                 raise RuntimeError("Probe generation retry loop ended without a result")
             remaining -= requested
+            next_set_ordinal += requested
             batch_index += 1
             progress.update(requested)
             progress.set_postfix(call=batch_index, refresh=False)
@@ -965,7 +1046,12 @@ class ControlledVerificationProbeGenerator:
         return generated, {
             "hypothesis_id": hypothesis.id,
             "selected_context_ids": [str(row["id"]) for row in selected_context],
-            "generation_finalized_without_student_predictions": True,
+            "ordinal_start": generation_start_ordinal,
+            "ordinal_end": next_set_ordinal,
+            "attempted_probe_sets": next_set_ordinal - generation_start_ordinal,
+            "generated_probe_sets": len(generated) // len(PROBE_TYPES),
+            "failed_generation_probe_sets": failed_probe_sets,
+            "student_outcomes_in_teacher_prompt": False,
             "calls": logs,
         }
 
@@ -1001,6 +1087,7 @@ class TeacherVerificationProbeValidator:
         set_ids = sorted(grouped)
         decisions: dict[str, ProbeValidationDecision] = {}
         logs: list[dict[str, Any]] = []
+        failed_validation_probe_sets = 0
         pending_batches: list[tuple[int, tuple[int, ...], list[str]]] = [
             (
                 batch_index,
@@ -1106,12 +1193,24 @@ class TeacherVerificationProbeValidator:
                     last_error = exc
                     if "Teacher prompt exceeds teacher.max_input_tokens" in str(exc):
                         if len(batch_ids) == 1:
-                            progress.close()
-                            raise ValueError(
-                                "Verification QC prompt for one probe set exceeds "
-                                "teacher.max_input_tokens; shorten the generated probe "
-                                "text or increase teacher.max_input_tokens"
-                            ) from exc
+                            failed_validation_probe_sets += 1
+                            logs.append(
+                                {
+                                    "verification_substage": (
+                                        "validation_set_abstention"
+                                    ),
+                                    "hypothesis_id": hypothesis.id,
+                                    "probe_set_id": batch_ids[0],
+                                    "reason": str(exc),
+                                }
+                            )
+                            tqdm.write(
+                                f"Skipping verification QC set {batch_ids[0]} for "
+                                f"{hypothesis.id}: its singleton prompt exceeds the "
+                                "teacher input limit."
+                            )
+                            progress.update(1)
+                            break
                         midpoint = len(batch_ids) // 2
                         child_batches = [
                             (batch_index, (*split_path, 0), batch_ids[:midpoint]),
@@ -1127,11 +1226,48 @@ class TeacherVerificationProbeValidator:
                         split_required = True
                         break
                     if attempt + 1 == self.max_attempts_per_batch:
-                        progress.close()
-                        raise ValueError(
-                            "Verification probe validation batch remained invalid "
-                            f"after {self.max_attempts_per_batch} attempts"
-                        ) from exc
+                        if len(batch_ids) > 1:
+                            midpoint = len(batch_ids) // 2
+                            child_batches = [
+                                (
+                                    batch_index,
+                                    (*split_path, 0),
+                                    batch_ids[:midpoint],
+                                ),
+                                (
+                                    batch_index,
+                                    (*split_path, 1),
+                                    batch_ids[midpoint:],
+                                ),
+                            ]
+                            pending_batches[0:0] = child_batches
+                            tqdm.write(
+                                f"Verification QC batch {batch_label} for "
+                                f"{hypothesis.id} remained invalid after "
+                                f"{self.max_attempts_per_batch} attempts; splitting "
+                                f"{len(batch_ids)} probe sets into "
+                                f"{len(child_batches[0][2])}+"
+                                f"{len(child_batches[1][2])}."
+                            )
+                            split_required = True
+                            break
+                        failed_validation_probe_sets += 1
+                        logs.append(
+                            {
+                                "verification_substage": "validation_set_abstention",
+                                "hypothesis_id": hypothesis.id,
+                                "probe_set_id": batch_ids[0],
+                                "attempts": self.max_attempts_per_batch,
+                                "reason": str(exc),
+                            }
+                        )
+                        tqdm.write(
+                            f"Skipping verification QC set {batch_ids[0]} for "
+                            f"{hypothesis.id} after "
+                            f"{self.max_attempts_per_batch} invalid attempts."
+                        )
+                        progress.update(1)
+                        break
                     tqdm.write(
                         f"Retrying verification QC batch {batch_label} for "
                         f"{hypothesis.id} after invalid teacher response "
@@ -1145,7 +1281,11 @@ class TeacherVerificationProbeValidator:
             if split_required:
                 continue
         progress.close()
-        return decisions, {"hypothesis_id": hypothesis.id, "calls": logs}
+        return decisions, {
+            "hypothesis_id": hypothesis.id,
+            "failed_validation_probe_sets": failed_validation_probe_sets,
+            "calls": logs,
+        }
 
 
 def _group_probe_sets(
@@ -1187,6 +1327,7 @@ def finalize_valid_probe_sets(
     verification_context: Sequence[Mapping[str, Any]],
     *,
     near_duplicate_threshold: float = 0.92,
+    previously_accepted: Sequence[VerificationProbe] = (),
 ) -> tuple[list[VerificationProbe], list[dict[str, Any]]]:
     """Fail closed per set; validation never sees student predictions."""
     grouped = _group_probe_sets(probes)
@@ -1204,8 +1345,15 @@ def finalize_valid_probe_sets(
     }
     accepted: list[VerificationProbe] = []
     rejected: list[dict[str, Any]] = []
-    observed_pairs: dict[str, str] = {}
-    observed_signatures: list[tuple[frozenset[str], str]] = []
+    previous = list(previously_accepted)
+    if len({probe.id for probe in previous}) != len(previous):
+        raise ValueError("previously_accepted probe IDs must be unique")
+    observed_pairs: dict[str, str] = {
+        _normalized_pair(probe): probe.id for probe in previous
+    }
+    observed_signatures: list[tuple[frozenset[str], str]] = [
+        (_token_set(pair), probe_id) for pair, probe_id in observed_pairs.items()
+    ]
     for set_id in sorted(grouped):
         members = grouped[set_id]
         reasons: list[str] = []
@@ -1285,7 +1433,12 @@ def predict_probe_sets(
     *,
     batch_size: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Predict finalized probes and construct one control-aware Z per probe set."""
+    """Predict finalized probes and expose target-only and strict-joint outcomes.
+
+    ``z`` remains the historical strict-joint outcome for artifact compatibility.
+    Certification code must explicitly choose the configured metric instead of
+    assuming that the compatibility field is the selection statistic.
+    """
     if batch_size <= 0:
         raise ValueError("Probe prediction batch_size must be positive")
     grouped = _group_probe_sets(probes)
@@ -1333,6 +1486,11 @@ def predict_probe_sets(
             prediction_by_id[members["invariant_control"].id]
             == members["invariant_control"].expected_label
         )
+        strict_joint = (
+            target_failure
+            and counterfactual_correct
+            and invariant_correct
+        )
         outcomes.append(
             {
                 "hypothesis_id": hypothesis.id,
@@ -1343,11 +1501,9 @@ def predict_probe_sets(
                 "target_failure_observed": target_failure,
                 "counterfactual_control_correct": counterfactual_correct,
                 "invariant_control_correct": invariant_correct,
-                "z": int(
-                    target_failure
-                    and counterfactual_correct
-                    and invariant_correct
-                ),
+                "target_failure_z": int(target_failure),
+                "strict_joint_z": int(strict_joint),
+                "z": int(strict_joint),
                 "z_definition": (
                     "target exhibits the predeclared wrong HANS label AND both "
                     "counterfactual/invariant controls receive their exact MNLI labels"

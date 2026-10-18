@@ -1,0 +1,24 @@
+extends: stage2_benchmark_ours_verified_v3.yaml
+
+# Protocol v4 changes only evaluation/stopping cost. Acquisition, verified
+# evidence, CE training, and the maximum 128-example budget remain unchanged.
+stage2_benchmark:
+  ours_adaptive_stopping:
+    enabled: true
+    subset_manifest: outputs/stage2_shared/gain_eval_stopping_subset_v1.json
+    reuse_frozen_base_predictions: true
+
+    # The 900-example subset is too small for the conservative empirical-
+    # Bernstein UCB used by v3 to be a useful gate. Keep that interval as a
+    # diagnostic and use a predeclared practical paired-gain rule for stopping.
+    decision_rule: practical_paired_gain_patience_v1
+    delta: 0.05
+    minimum_rounds: 2
+    patience: 2
+    minimum_mean_gain: 0.003
+    maximum_heuristic_gain: 0.005
+    maximum_label_gain: 0.005
+    minimum_heuristic_gain: -0.01
+    minimum_label_gain: -0.01
+    maximum_small_gain_ucb: 0.02
+    minimum_optimistic_gain_per_gpu_hour: 0.0

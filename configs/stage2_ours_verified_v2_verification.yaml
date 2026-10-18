@@ -1,0 +1,21 @@
+extends: main_verification.yaml
+
+# Keep target-failure certification and the union-adjusted Hoeffding bound.
+# The predeclared looks request 20 sets first, then at most ten more per look.
+# verify_hypotheses.py multiplies T by the number of looks, so optional stopping
+# does not silently weaken the confidence guarantee.
+verification:
+  certification_metric: target_failure
+  n_probe_sets: 60
+  min_valid_probe_sets: 20
+  max_hypotheses_per_round: 5
+  max_rounds: 1
+  max_probe_sets_per_call: 4
+  max_attempts_per_batch: 5
+  validation_max_probe_sets_per_call: 8
+  validation_max_attempts_per_batch: 5
+  probe_prompt_version: controlled_verification_probes_v4
+  adaptive_verification:
+    enabled: true
+    initial_probe_sets: 20
+    increment_probe_sets: 10

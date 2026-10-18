@@ -1,6 +1,8 @@
 extends: main_common.yaml
 
 verification:
+  # Backward-compatible default. Focused target-only profiles override this.
+  certification_metric: strict_joint
   delta: 0.05
   tau_v: 0.5
   n_probe_sets: 50

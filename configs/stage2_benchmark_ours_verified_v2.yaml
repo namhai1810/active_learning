@@ -1,0 +1,14 @@
+extends: stage2_benchmark.yaml
+
+stage2_benchmark:
+  synthetic_artifacts:
+    ours_verified:
+      accepted: outputs/stage2_acquisition_ours_verified_v2/seed_{seed}/synthetic/accepted.jsonl
+      provenance: outputs/stage2_acquisition_ours_verified_v2/seed_{seed}/synthetic/manifest.json
+      teacher_calls_dir: outputs/stage2_acquisition_ours_verified_v2/seed_{seed}/teacher_calls
+  ours_selection:
+    strategy: stratified_student_utility_v1
+    utility_weight: 1.0
+    diversity_weight: 0.35
+    label_balance_weight: 1.0
+    certification_weight: 0.25

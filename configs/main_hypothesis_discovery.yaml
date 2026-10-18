@@ -11,6 +11,7 @@ hypothesis_generation:
   # Correct controls with high estimated error probability are deliberately
   # preferred: they are challenging false alarms for the critic, not easy cases.
   contrast_sampling_strategy: highest_error_score
+  max_attempts_per_call: 3
   seed: 42
   prompt_version: failure_discovery_v1
   error_scorer:

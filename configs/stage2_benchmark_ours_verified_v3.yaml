@@ -1,0 +1,44 @@
+extends: stage2_benchmark_ours_verified_v2.yaml
+
+# Protocol v3 reuses the completed v2 verified pool. It makes no teacher calls.
+# Acquisition is planned once from the base checkpoint, then consumed in
+# complete-pair stages of 32 examples so the stopping rule cannot change the
+# ranking retrospectively.
+stage2_benchmark:
+  ours_selection:
+    strategy: verification_conditioned_primal_dual_v1
+    verification_probes: outputs/stage2_acquisition_ours_verified_v2/seed_{seed}/verification/probes.jsonl
+    verification_outcomes: outputs/stage2_acquisition_ours_verified_v2/seed_{seed}/verification/probe_set_outcomes.jsonl
+
+    # Learned distributions: target labels come from certified failure mass;
+    # hypotheses come from target LCB minus average control error.
+    label_temperature: 1.0
+    hypothesis_temperature: 0.25
+
+    # Student NLL is clipped and normalized separately inside every
+    # (hypothesis, gold-label) stratum before pair-level scoring.
+    utility_quantile_low: 0.10
+    utility_quantile_high: 0.90
+    utility_weight: 1.0
+    diversity_weight: 0.35
+    specificity_weight: 0.50
+
+    # Online primal-dual balancing replaces hard-coded quotas. Seeded Gumbel
+    # sampling makes the policy stochastic but exactly reproducible.
+    label_dual_weight: 1.25
+    hypothesis_dual_weight: 0.75
+    pair_type_dual_weight: 0.50
+    dual_step: 0.50
+    dual_clip: 3.0
+    sampling_temperature: 0.20
+
+  ours_adaptive_stopping:
+    enabled: true
+    delta: 0.05
+    minimum_rounds: 2
+    patience: 2
+    minimum_mean_gain: 0.002
+    maximum_small_gain_ucb: 0.02
+    # Zero disables this optional absolute GPU-hour threshold. Cost efficiency
+    # is still recorded at every look for analysis.
+    minimum_optimistic_gain_per_gpu_hour: 0.0

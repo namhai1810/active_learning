@@ -1,0 +1,6 @@
+extends: stage2_ours_verified_efficient_verification.yaml
+
+# Protocol v1: certify recurring target failures. Controls remain independently
+# validated and are reported as diagnostics, but do not gate synthetic training.
+verification:
+  certification_metric: target_failure

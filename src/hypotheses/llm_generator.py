@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import random
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -13,10 +14,17 @@ from typing import Any
 from src.data.labels import HANS_LABELS
 from src.hypotheses.error_scorer import ErrorProbabilityScorer, ErrorScoreBatch
 from src.hypotheses.types import FailureHypothesis
-from src.teacher.base import TeacherCall, TeacherLLM, teacher_exchange_log
+from src.teacher.base import (
+    TeacherCall,
+    TeacherLLM,
+    teacher_exchange_log,
+    teacher_failure_log,
+)
 
 
 DISCOVERY_PROMPT_VERSION = "failure_discovery_v1"
+STRICT_JSON_DISCOVERY_PROMPT_VERSION = "failure_discovery_v2"
+DIVERSE_DISCOVERY_PROMPT_VERSION = "failure_discovery_v3"
 _DISCOVERY_FIELDS = (
     "id",
     "premise",
@@ -40,6 +48,7 @@ _CANDIDATE_FIELDS = {
 @dataclass(frozen=True)
 class LLMDiscoveryConfig:
     max_hypotheses: int = 5
+    min_hypotheses: int = 1
     max_error_examples: int = 80
     max_contrast_examples: int = 20
     sampling_strategy: str = "exponential"
@@ -47,12 +56,17 @@ class LLMDiscoveryConfig:
     sampling_beta: float = 10.0
     sampling_threshold: float = 0.7
     contrast_sampling_strategy: str = "highest_error_score"
+    diversity_sampling: bool = False
+    max_candidate_token_jaccard: float = 1.0
+    max_attempts_per_call: int = 3
     seed: int = 42
     prompt_version: str = DISCOVERY_PROMPT_VERSION
 
     def __post_init__(self) -> None:
         if self.max_hypotheses <= 0:
             raise ValueError("max_hypotheses must be positive")
+        if not 1 <= self.min_hypotheses <= self.max_hypotheses:
+            raise ValueError("min_hypotheses must be in [1, max_hypotheses]")
         if self.max_error_examples <= 0:
             raise ValueError("max_error_examples must be positive")
         if self.max_contrast_examples < 0:
@@ -81,6 +95,10 @@ class LLMDiscoveryConfig:
             raise ValueError(
                 "contrast_sampling_strategy must be highest_error_score or same_as_errors"
             )
+        if self.max_attempts_per_call <= 0:
+            raise ValueError("max_attempts_per_call must be positive")
+        if not 0.0 < self.max_candidate_token_jaccard <= 1.0:
+            raise ValueError("max_candidate_token_jaccard must be in (0, 1]")
         if not self.prompt_version.strip():
             raise ValueError("prompt_version must be non-empty")
 
@@ -121,6 +139,45 @@ def _candidate_id(candidate: Mapping[str, Any]) -> str:
         sort_keys=True,
     )
     return "llm_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+def _word_set(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _candidate_token_jaccard(
+    left: Mapping[str, Any], right: Mapping[str, Any]
+) -> float:
+    fields = (
+        "name",
+        "description",
+        "predicted_failure_behavior",
+        "intervention_target",
+    )
+    left_tokens = _word_set(" ".join(str(left.get(field, "")) for field in fields))
+    right_tokens = _word_set(" ".join(str(right.get(field, "")) for field in fields))
+    union = left_tokens | right_tokens
+    return len(left_tokens & right_tokens) / len(union) if union else 1.0
+
+
+def _discovery_diversity_bucket(record: Mapping[str, Any]) -> str:
+    premise_tokens = _word_set(str(record.get("premise", "")))
+    hypothesis_tokens = _word_set(str(record.get("hypothesis", "")))
+    union = premise_tokens | hypothesis_tokens
+    overlap = len(premise_tokens & hypothesis_tokens) / len(union) if union else 0.0
+    overlap_band = "low" if overlap < 0.34 else "mid" if overlap < 0.67 else "high"
+    length_delta = len(premise_tokens) - len(hypothesis_tokens)
+    length_band = (
+        "premise_longer"
+        if length_delta >= 3
+        else "hypothesis_longer"
+        if length_delta <= -3
+        else "similar_length"
+    )
+    return (
+        f"{record.get('gold', 'unknown')}->{record.get('prediction', 'unknown')}:"
+        f"{overlap_band}:{length_band}"
+    )
 
 
 class LLMFailureHypothesisGenerator:
@@ -208,7 +265,28 @@ class LLMFailureHypothesisGenerator:
             priority.append((key, _stable_rank(row, self.config.seed, group), row))
         priority.sort(key=lambda item: (item[0], item[1]))
         positive = [item for item in priority if math.isfinite(item[0])]
-        return [item[2] for item in positive[: min(budget, len(positive))]]
+        if not self.config.diversity_sampling or group != "error":
+            return [item[2] for item in positive[: min(budget, len(positive))]]
+
+        # Spread the evidence budget over observable NLI-error shapes without
+        # exposing benchmark taxonomy. Ranking inside every bucket still uses
+        # the configured teacher-error score and deterministic weighted key.
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for _, _, row in positive:
+            buckets.setdefault(_discovery_diversity_bucket(row), []).append(row)
+        selected: list[dict[str, Any]] = []
+        ordered_buckets = sorted(buckets)
+        while len(selected) < min(budget, len(positive)):
+            progressed = False
+            for bucket in ordered_buckets:
+                if buckets[bucket]:
+                    selected.append(buckets[bucket].pop(0))
+                    progressed = True
+                    if len(selected) == min(budget, len(positive)):
+                        break
+            if not progressed:
+                break
+        return selected
 
     def _select_records(
         self, predictions: Sequence[Mapping[str, Any]]
@@ -283,6 +361,7 @@ class LLMFailureHypothesisGenerator:
                 "threshold": self.config.sampling_threshold,
                 "threshold_fill_policy": "none",
                 "contrast_sampling_strategy": self.config.contrast_sampling_strategy,
+                "diversity_sampling": self.config.diversity_sampling,
             },
             "total_eligible_examples": len(errors) + len(correct),
             "eligible_error_examples": len(errors),
@@ -295,6 +374,15 @@ class LLMFailureHypothesisGenerator:
             "selected_error_scores": [
                 scored.scores[str(row["id"])] for row in selected_errors
             ],
+            "selected_error_diversity_buckets": {
+                bucket: sum(
+                    _discovery_diversity_bucket(row) == bucket
+                    for row in selected_errors
+                )
+                for bucket in sorted(
+                    {_discovery_diversity_bucket(row) for row in selected_errors}
+                )
+            },
             "selected_contrast_ids": [str(row["id"]) for row in selected_correct],
             "selected_contrast_scores": [
                 scored.scores[str(row["id"])] for row in selected_correct
@@ -350,43 +438,169 @@ class LLMFailureHypothesisGenerator:
             "incorrect_examples": errors,
             "contrasting_correct_examples": contrasts,
         }
-        call = TeacherCall(
-            task="hypothesis_discovery",
-            prompt_version=self.config.prompt_version,
-            seed=self.config.seed,
-            system_prompt=system_prompt,
-            payload=payload,
-        )
-        response = self.teacher.generate_json(call)
-        if set(response) != {"hypotheses"} or not isinstance(
-            response["hypotheses"], list
-        ):
-            raise ValueError("Teacher discovery response must contain only hypotheses[]")
-        if len(response["hypotheses"]) > self.config.max_hypotheses:
-            raise ValueError("Teacher returned more hypotheses than configured")
-
-        presented_ids = {str(row["id"]) for row in (*errors, *contrasts)}
-        hypotheses: list[FailureHypothesis] = []
-        for raw in response["hypotheses"]:
-            if not isinstance(raw, dict) or set(raw) != _CANDIDATE_FIELDS:
-                raise ValueError(
-                    "Each teacher hypothesis must exactly match the declared schema"
-                )
-            support_ids = tuple(str(item) for item in raw["support_example_ids"])
-            if not set(support_ids) <= presented_ids:
-                raise ValueError("Hypothesis cites an example not shown to the teacher")
-            value = {
-                "id": _candidate_id(raw),
-                **raw,
-                "heuristic": None,
-                "source": "llm_teacher",
-                "prompt_version": self.config.prompt_version,
+        if self.config.prompt_version in {
+            STRICT_JSON_DISCOVERY_PROMPT_VERSION,
+            DIVERSE_DISCOVERY_PROMPT_VERSION,
+        }:
+            payload["response_constraints"] = {
+                "standalone_json_only": True,
+                "max_verification_criteria_per_hypothesis": 3,
+                "max_support_ids_per_hypothesis": 5,
+                "concise_text": True,
             }
-            hypotheses.append(
-                FailureHypothesis.from_mapping(value, require_llm_schema=True)
+        if self.config.prompt_version == DIVERSE_DISCOVERY_PROMPT_VERSION:
+            payload["diversity_requirements"] = {
+                "requested_hypotheses": self.config.max_hypotheses,
+                "minimum_distinct_hypotheses": self.config.min_hypotheses,
+                "one_mechanism_per_hypothesis": True,
+                "avoid_paraphrased_or_nested_failure_mechanisms": True,
+                "cover_distinct_error_shapes_from_the_supplied_evidence": True,
+            }
+        presented_ids = {str(row["id"]) for row in (*errors, *contrasts)}
+        discovery_attempts: list[dict[str, Any]] = []
+        last_error: ValueError | None = None
+        call: TeacherCall | None = None
+        response: dict[str, Any] | None = None
+        hypotheses: list[FailureHypothesis] | None = None
+        support_id_normalizations: list[dict[str, Any]] = []
+        for attempt in range(self.config.max_attempts_per_call):
+            attempt_payload = dict(payload)
+            if last_error is not None:
+                diversity_retry = (
+                    f" Return between {self.config.min_hypotheses} and "
+                    f"{self.config.max_hypotheses} distinct hypotheses, with no "
+                    "paraphrased or nested versions of the same mechanism."
+                    if self.config.prompt_version
+                    == DIVERSE_DISCOVERY_PROMPT_VERSION
+                    else ""
+                )
+                attempt_payload["retry_correction"] = {
+                    "previous_response_rejected_because": str(last_error),
+                    "mandatory_instruction": (
+                        "Return exactly one standalone JSON object with only the key "
+                        "hypotheses. Close every string, array, and object; emit no "
+                        "markdown or comments. Keep each hypothesis concise: at most "
+                        "three verification criteria and five support IDs."
+                        + diversity_retry
+                    ),
+                }
+            if attempt == 0:
+                derived_seed = self.config.seed
+            else:
+                derived_seed = int.from_bytes(
+                    hashlib.sha256(
+                        f"{self.config.seed}:hypothesis-discovery:attempt:{attempt}".encode(
+                            "utf-8"
+                        )
+                    ).digest()[:4],
+                    "big",
+                )
+            call = TeacherCall(
+                task="hypothesis_discovery",
+                prompt_version=self.config.prompt_version,
+                seed=derived_seed,
+                system_prompt=system_prompt,
+                payload=attempt_payload,
             )
-        if len({item.id for item in hypotheses}) != len(hypotheses):
-            raise ValueError("Teacher returned duplicate hypotheses")
+            response = None
+            try:
+                response = self.teacher.generate_json(call)
+                if set(response) != {"hypotheses"} or not isinstance(
+                    response["hypotheses"], list
+                ):
+                    raise ValueError(
+                        "Teacher discovery response must contain only hypotheses[]"
+                    )
+                if len(response["hypotheses"]) > self.config.max_hypotheses:
+                    raise ValueError("Teacher returned more hypotheses than configured")
+                if len(response["hypotheses"]) < self.config.min_hypotheses:
+                    raise ValueError(
+                        "Teacher returned fewer hypotheses than the configured minimum"
+                    )
+
+                parsed: list[FailureHypothesis] = []
+                attempt_normalizations: list[dict[str, Any]] = []
+                for candidate_index, raw in enumerate(response["hypotheses"]):
+                    if not isinstance(raw, dict) or set(raw) != _CANDIDATE_FIELDS:
+                        raise ValueError(
+                            "Each teacher hypothesis must exactly match the declared schema"
+                        )
+                    raw_support_value = raw["support_example_ids"]
+                    if not isinstance(raw_support_value, (list, tuple)) or any(
+                        not isinstance(item, str) for item in raw_support_value
+                    ):
+                        raise ValueError(
+                            "Main-method hypothesis support_example_ids must be a "
+                            "string list"
+                        )
+                    raw_support_ids = tuple(raw_support_value)
+                    # Repeating an otherwise valid evidence ID is a harmless
+                    # serialization defect, not a different scientific claim.
+                    # Normalize it here while keeping FailureHypothesis strict for
+                    # artifacts produced by every other caller.
+                    support_ids = tuple(dict.fromkeys(raw_support_ids))
+                    if not set(support_ids) <= presented_ids:
+                        raise ValueError(
+                            "Hypothesis cites an example not shown to the teacher"
+                        )
+                    normalized_raw = {
+                        **raw,
+                        "support_example_ids": list(support_ids),
+                    }
+                    if len(support_ids) != len(raw_support_ids):
+                        attempt_normalizations.append(
+                            {
+                                "candidate_index": candidate_index,
+                                "field": "support_example_ids",
+                                "removed_duplicate_count": len(raw_support_ids)
+                                - len(support_ids),
+                            }
+                        )
+                    value = {
+                        "id": _candidate_id(normalized_raw),
+                        **normalized_raw,
+                        "heuristic": None,
+                        "source": "llm_teacher",
+                        "prompt_version": self.config.prompt_version,
+                    }
+                    parsed.append(
+                        FailureHypothesis.from_mapping(
+                            value, require_llm_schema=True
+                        )
+                    )
+                if len({item.id for item in parsed}) != len(parsed):
+                    raise ValueError("Teacher returned duplicate hypotheses")
+                for left_index, left in enumerate(response["hypotheses"]):
+                    for right_index in range(left_index + 1, len(response["hypotheses"])):
+                        similarity = _candidate_token_jaccard(
+                            left, response["hypotheses"][right_index]
+                        )
+                        if similarity > self.config.max_candidate_token_jaccard:
+                            raise ValueError(
+                                "Teacher returned near-duplicate hypotheses at indices "
+                                f"{left_index} and {right_index}: token_jaccard="
+                                f"{similarity:.3f} exceeds "
+                                f"{self.config.max_candidate_token_jaccard:.3f}"
+                            )
+            except ValueError as exc:
+                discovery_attempts.append(
+                    teacher_failure_log(self.teacher, call, exc, response)
+                )
+                last_error = exc
+                if attempt + 1 == self.config.max_attempts_per_call:
+                    raise ValueError(
+                        "Hypothesis discovery response remained invalid after "
+                        f"{self.config.max_attempts_per_call} attempts"
+                    ) from exc
+                continue
+            hypotheses = parsed
+            support_id_normalizations = attempt_normalizations
+            discovery_attempts.append(
+                teacher_exchange_log(self.teacher, call, response)
+            )
+            break
+        if call is None or response is None or hypotheses is None:
+            raise RuntimeError("Hypothesis discovery retry loop ended without a result")
         evidence = {
             "status": "generated",
             "num_errors_presented": len(errors),
@@ -396,10 +610,12 @@ class LLMFailureHypothesisGenerator:
             "candidate_support_ids": {
                 item.id: list(item.support_example_ids) for item in hypotheses
             },
+            "response_normalizations": support_id_normalizations,
             "selection": selection_log,
         }
         log = {
             "scoring_calls": list(scored.logs),
+            "hypothesis_discovery_attempts": discovery_attempts,
             "selection": selection_log,
             **teacher_exchange_log(self.teacher, call, response),
         }

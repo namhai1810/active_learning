@@ -1,0 +1,11 @@
+extends: main_hypothesis_discovery.yaml
+
+# Protocol v2: expose a broader, observable mix of discovery-error shapes and
+# require five genuinely distinct, falsifiable mechanisms from the teacher.
+hypothesis_generation:
+  max_hypotheses: 5
+  min_hypotheses: 5
+  diversity_sampling: true
+  max_candidate_token_jaccard: 0.78
+  max_attempts_per_call: 5
+  prompt_version: failure_discovery_v3

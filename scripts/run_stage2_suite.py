@@ -42,6 +42,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help="Run only these configured budgets (default: every configured budget).",
     )
+    parser.add_argument(
+        "--ours-objective",
+        choices=("pairwise", "ce"),
+        default="pairwise",
+        help=(
+            "Training objective used by ours_verified. Acquisition and selected "
+            "IDs are unchanged, enabling a controlled objective ablation."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -106,6 +115,8 @@ def main() -> None:
             "--rounds", str(rounds),
             "--output-dir", str(output),
         ]
+        if method == "ours_verified":
+            command.extend(["--ours-objective", args.ours_objective])
         if per_round is not None:
             command.extend(["--per-round-budget", str(per_round)])
         subprocess.run(command, cwd=PROJECT_ROOT, check=True)

@@ -11,13 +11,25 @@ from src.benchmark.hans_manifest import (
     build_frozen_hans_manifest,
     validate_frozen_hans_manifest,
 )
-from src.benchmark.selection import select_complete_pairs
+from src.benchmark.selection import (
+    select_complete_pairs,
+    select_stratified_utility_pairs,
+    select_verification_conditioned_primal_dual_pairs,
+)
+from src.benchmark.stopping_subset import (
+    build_stopping_subset_manifest,
+    validate_stopping_subset_manifest,
+)
 from src.decision.artifact_cost import build_artifact_costs, build_round_incurred_cost
 from src.decision.cost_aware import select_intervention
 from src.decision.types import DecisionCandidate
 from src.evaluation.metrics import compute_hans_metrics
 from src.synthetic.types import SyntheticNLIExample
-from scripts.run_stage2_benchmark import _synthetic_pool
+from scripts.run_stage2_benchmark import (
+    _adaptive_stop_decision,
+    _paired_gain_confidence,
+    _synthetic_pool,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +65,32 @@ def _synthetic(pair_index, member):
         targeting_rationale="tests role semantics",
         generator_prompt_version="v1",
     )
+
+
+def _stratified_synthetic(pair_index, hypothesis_id, pair_type, labels):
+    members = (
+        ("base", "relation_changed")
+        if pair_type == "counterfactual"
+        else ("base", "irrelevant_change")
+    )
+    return [
+        SyntheticNLIExample(
+            id=f"strat-{pair_index}-{member}",
+            premise=f"Scenario {pair_index} premise variant {offset}.",
+            hypothesis=f"Scenario {pair_index} hypothesis variant {offset}.",
+            label=labels[offset],
+            hypothesis_id=hypothesis_id,
+            pair_id=f"strat-pair-{pair_index}",
+            pair_type=pair_type,
+            pair_member=member,
+            pair_rationale="controlled pair",
+            seed_example_ids=("s1",),
+            label_rationale="declared test label",
+            targeting_rationale="tests the certified mechanism",
+            generator_prompt_version="v1",
+        )
+        for offset, member in enumerate(members)
+    ]
 
 
 def test_frozen_manifest_roundtrip_is_seed_independent_for_experiments():
@@ -95,9 +133,258 @@ def test_complete_pair_budget_and_shortage_are_explicit_across_rounds():
     assert first_status["shortage"] is False
 
 
+def test_stratified_student_utility_selection_is_balanced_and_deterministic():
+    pool = []
+    pair_specs = [
+        (0, "h1", "counterfactual", ("entailment", "contradiction")),
+        (1, "h1", "counterfactual", ("neutral", "contradiction")),
+        (2, "h1", "invariant", ("entailment", "entailment")),
+        (3, "h1", "invariant", ("neutral", "neutral")),
+        (4, "h2", "counterfactual", ("entailment", "neutral")),
+        (5, "h2", "counterfactual", ("contradiction", "neutral")),
+        (6, "h2", "invariant", ("entailment", "entailment")),
+        (7, "h2", "invariant", ("contradiction", "contradiction")),
+    ]
+    for spec in pair_specs:
+        pool.extend(_stratified_synthetic(*spec))
+    utility = {item.id: float(index + 1) for index, item in enumerate(pool)}
+
+    selected, diagnostics = select_stratified_utility_pairs(
+        pool,
+        budget=8,
+        seed=42,
+        utility_scores=utility,
+        certification_scores={"h1": 0.55, "h2": 0.75},
+    )
+    repeated, repeated_diagnostics = select_stratified_utility_pairs(
+        pool,
+        budget=8,
+        seed=42,
+        utility_scores=utility,
+        certification_scores={"h1": 0.55, "h2": 0.75},
+    )
+
+    assert [item.id for item in selected] == [item.id for item in repeated]
+    assert diagnostics == repeated_diagnostics
+    assert len(selected) == 8
+    assert all(
+        sum(item.pair_id == pair_id for item in selected) == 2
+        for pair_id in {item.pair_id for item in selected}
+    )
+    assert diagnostics["hypothesis_pair_counts"] == {"h1": 2, "h2": 2}
+    assert diagnostics["pair_type_counts"] == {
+        "counterfactual": 2,
+        "invariant": 2,
+    }
+    assert sum(diagnostics["label_counts"].values()) == 8
+    assert diagnostics["shortage"] is False
+
+
+def test_verification_conditioned_selection_learns_targets_and_is_reproducible():
+    pool = []
+    pair_specs = [
+        (0, "h1", "counterfactual", ("entailment", "contradiction")),
+        (1, "h1", "counterfactual", ("neutral", "contradiction")),
+        (2, "h1", "invariant", ("entailment", "entailment")),
+        (3, "h1", "invariant", ("neutral", "neutral")),
+        (4, "h2", "counterfactual", ("entailment", "neutral")),
+        (5, "h2", "counterfactual", ("contradiction", "neutral")),
+        (6, "h2", "invariant", ("entailment", "entailment")),
+        (7, "h2", "invariant", ("contradiction", "contradiction")),
+    ]
+    for spec in pair_specs:
+        pool.extend(_stratified_synthetic(*spec))
+    utility = {item.id: 0.1 + index / 10 for index, item in enumerate(pool)}
+    evidence = {
+        "h1": {
+            "lower_bound": 0.55,
+            "target_n": 20,
+            "target_failures_by_label": {
+                "entailment": 0,
+                "neutral": 14,
+                "contradiction": 2,
+            },
+            "counterfactual_accuracy": 0.55,
+            "invariant_accuracy": 0.50,
+        },
+        "h2": {
+            "lower_bound": 0.60,
+            "target_n": 20,
+            "target_failures_by_label": {
+                "entailment": 0,
+                "neutral": 16,
+                "contradiction": 1,
+            },
+            "counterfactual_accuracy": 0.95,
+            "invariant_accuracy": 0.85,
+        },
+    }
+
+    selected, diagnostics = select_verification_conditioned_primal_dual_pairs(
+        pool,
+        budget=8,
+        seed=42,
+        utility_scores=utility,
+        verification_evidence=evidence,
+    )
+    repeated, repeated_diagnostics = select_verification_conditioned_primal_dual_pairs(
+        pool,
+        budget=8,
+        seed=42,
+        utility_scores=utility,
+        verification_evidence=evidence,
+    )
+
+    assert [item.id for item in selected] == [item.id for item in repeated]
+    assert diagnostics == repeated_diagnostics
+    assert diagnostics["selection_strategy"] == "verification_conditioned_primal_dual_v1"
+    assert diagnostics["target_label_distribution"]["neutral"] > diagnostics[
+        "target_label_distribution"
+    ]["entailment"]
+    assert diagnostics["target_hypothesis_distribution"]["h2"] > diagnostics[
+        "target_hypothesis_distribution"
+    ]["h1"]
+    assert diagnostics["verification_evidence"]["h2"]["control_specificity"] > diagnostics[
+        "verification_evidence"
+    ]["h1"]["control_specificity"]
+    assert len(selected) == 8
+    assert len({item.pair_id for item in selected}) == 4
+    assert all(
+        sum(item.pair_id == pair_id for item in selected) == 2
+        for pair_id in {item.pair_id for item in selected}
+    )
+
+
+def test_paired_gain_stopping_requires_patience_and_records_cost_efficiency():
+    before = [{"id": f"e{index}", "correct": index % 2 == 0} for index in range(1000)]
+    after = [dict(row) for row in before]
+    confidence = _paired_gain_confidence(before, after, delta=0.05, max_looks=4)
+    config = {
+        "minimum_rounds": 2,
+        "patience": 2,
+        "minimum_mean_gain": 0.002,
+        "maximum_small_gain_ucb": 0.05,
+        "minimum_optimistic_gain_per_gpu_hour": 0.0,
+    }
+
+    stop, count, reason, cost = _adaptive_stop_decision(
+        confidence,
+        round_index=1,
+        consecutive_small=0,
+        config=config,
+        stage_gpu_seconds=120.0,
+    )
+    assert stop is False
+    assert count == 1
+    assert reason == "continue"
+    assert cost["optimistic_gain_per_gpu_hour"] >= 0.0
+
+    stop, count, reason, _ = _adaptive_stop_decision(
+        confidence,
+        round_index=2,
+        consecutive_small=count,
+        config=config,
+        stage_gpu_seconds=120.0,
+    )
+    assert stop is True
+    assert count == 2
+    assert reason == "diminishing_gain_patience_exhausted"
+
+
+def test_stopping_subset_is_balanced_deterministic_and_prediction_blind():
+    rows = [
+        {
+            "id": f"gain-{subcase}-{index}",
+            "subcase": subcase,
+            "heuristic": ("lexical_overlap", "subsequence", "constituent")[
+                subcase_index
+            ],
+            "gold": "entailment" if subcase_index % 2 else "non-entailment",
+            "correct": index % 3 == 0,
+        }
+        for subcase_index, subcase in enumerate(("case-a", "case-b", "case-c"))
+        for index in range(6)
+    ]
+    ids = [row["id"] for row in rows]
+    manifest = build_stopping_subset_manifest(
+        rows,
+        ids,
+        frozen_manifest_hash="frozen-hash",
+        examples_per_subcase=2,
+    )
+    changed_predictions = [{**row, "correct": not row["correct"]} for row in rows]
+    repeated = build_stopping_subset_manifest(
+        changed_predictions,
+        ids,
+        frozen_manifest_hash="frozen-hash",
+        examples_per_subcase=2,
+    )
+
+    assert manifest == repeated
+    assert len(manifest["stopping_eval_ids"]) == 6
+    assert len(manifest["gain_report_ids"]) == 12
+    assert set(manifest["stopping_counts_by_subcase"].values()) == {2}
+    stopping, report = validate_stopping_subset_manifest(
+        manifest,
+        rows,
+        ids,
+        frozen_manifest_hash="frozen-hash",
+    )
+    assert set(stopping).isdisjoint(report)
+    assert set(stopping) | set(report) == set(ids)
+
+
+def test_practical_stopping_uses_group_gains_and_patience_not_the_wide_ucb():
+    confidence = {
+        "mean_gain": 0.002,
+        "upper_bound": 0.20,
+        "group_gains": {
+            "heuristic": {
+                "lexical_overlap": 0.003,
+                "subsequence": 0.004,
+                "constituent": -0.001,
+            },
+            "gold": {"entailment": 0.001, "non-entailment": 0.004},
+        },
+    }
+    config = {
+        "decision_rule": "practical_paired_gain_patience_v1",
+        "minimum_rounds": 2,
+        "patience": 2,
+        "minimum_mean_gain": 0.003,
+        "maximum_heuristic_gain": 0.005,
+        "maximum_label_gain": 0.005,
+        "minimum_heuristic_gain": -0.01,
+        "minimum_label_gain": -0.01,
+        "maximum_small_gain_ucb": 0.02,
+    }
+    stop, count, _, stats = _adaptive_stop_decision(
+        confidence,
+        round_index=1,
+        consecutive_small=0,
+        config=config,
+        stage_gpu_seconds=10.0,
+    )
+    assert stop is False
+    assert count == 1
+    assert stats["small_gain_look"] is True
+    stop, count, reason, _ = _adaptive_stop_decision(
+        confidence,
+        round_index=2,
+        consecutive_small=count,
+        config=config,
+        stage_gpu_seconds=10.0,
+    )
+    assert stop is True
+    assert count == 2
+    assert reason == "diminishing_gain_patience_exhausted"
+
+
 def test_only_well_formed_verified_abstention_may_have_an_empty_pool(tmp_path):
     accepted = tmp_path / "accepted.jsonl"
     manifest = tmp_path / "manifest.json"
+    calls = tmp_path / "teacher_calls"
+    calls.mkdir()
     accepted.write_text("", encoding="utf-8")
     payload = {
         "stage2_policy": "failure_targeted_verified",
@@ -114,14 +401,43 @@ def test_only_well_formed_verified_abstention_may_have_an_empty_pool(tmp_path):
             "ours_verified": {
                 "accepted": str(accepted),
                 "provenance": str(manifest),
+                "teacher_calls_dir": str(calls),
             }
         }
     }
+    (calls / "discovery.jsonl").write_text(
+        json.dumps(
+            {
+                "usage": {"input_tokens": 9999, "output_tokens": 9999},
+                "scoring_calls": [
+                    {"usage": {"input_tokens": 100, "output_tokens": 10}}
+                ],
+                "hypothesis_discovery_attempts": [
+                    {"usage": {"input_tokens": 200, "output_tokens": 20}}
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (calls / "verification.jsonl").write_text(
+        json.dumps(
+            {
+                "calls": [
+                    {"usage": {"input_tokens": 400, "output_tokens": 40}}
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     pool, provenance = _synthetic_pool(benchmark, "ours_verified", 42)
 
     assert pool == []
     assert provenance["status"] == "abstained_no_certified_hypotheses"
+    assert provenance["resource_usage"]["teacher_input_tokens"] == 700
+    assert provenance["resource_usage"]["teacher_output_tokens"] == 70
     payload["certified_hypothesis_ids"] = ["h1"]
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="empty pool"):
@@ -317,6 +633,34 @@ def test_stage2_report_generates_visualizations(tmp_path):
             **result["hans_final"],
             "overall_accuracy": 0.99,
         },
+        "synthetic_provenance": {
+            "verification_summary": {
+                "verification_protocol_version": "target_failure_verified_v1",
+                "certification_metric": "target_failure",
+                "results": [
+                    {
+                        "hypothesis_id": "h1",
+                        "hypothesis_name": "Toy target failure",
+                        "certification_metric": "target_failure",
+                        "certified": False,
+                        "diagnostics": {
+                            "target_failure": {
+                                "nu_hat": 0.4,
+                                "lower_bound": 0.1,
+                            },
+                            "strict_joint": {
+                                "nu_hat": 0.2,
+                                "lower_bound": -0.1,
+                            },
+                            "controls": {
+                                "counterfactual": {"accuracy": 0.7},
+                                "invariant": {"accuracy": 0.8},
+                            },
+                        },
+                    }
+                ],
+            }
+        },
     }
     (abstained_run / "result.json").write_text(
         json.dumps(abstained_result), encoding="utf-8"
@@ -352,6 +696,72 @@ def test_stage2_report_generates_visualizations(tmp_path):
     assert abstained_group["hans_final.overall_accuracy"]["mean"] is None
     assert abstained_group["actual_final_training_examples"]["mean"] == 0
     assert "ABSTAINED" in (report / "STAGE2_REPORT.md").read_text()
+    assert "## Verification diagnostics" in (
+        report / "STAGE2_REPORT.md"
+    ).read_text()
+    assert summary["verification_diagnostics"][0]["hypothesis_id"] == "h1"
     assert "ours_verified · budget 128" not in (
         report / "figures" / "experiment_a_final_hans_accuracy.svg"
     ).read_text()
+
+
+def test_objective_ablation_report_requires_identical_selected_ids(tmp_path):
+    result_paths = {}
+    common = {
+        "method": "ours_verified",
+        "seed": 42,
+        "requested_budget": 4,
+        "manifest_hash": "frozen-manifest",
+        "run_status": "complete",
+        "selected_ids_file": "selected_ids.json",
+        "hans_final": {
+            "overall_accuracy": 0.6,
+            "entailment_accuracy": 0.7,
+            "non_entailment_accuracy": 0.5,
+        },
+        "mnli": {
+            "matched": {"accuracy": 0.4},
+            "mismatched": {"accuracy": 0.3},
+        },
+    }
+    for objective in ("pairwise", "ce"):
+        run = tmp_path / objective
+        run.mkdir()
+        result = {
+            **common,
+            "ours_objective": objective,
+            "hans_final": {
+                **common["hans_final"],
+                "overall_accuracy": 0.65 if objective == "pairwise" else 0.6,
+            },
+        }
+        result_path = run / "result.json"
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        (run / "selected_ids.json").write_text(
+            json.dumps({"ids": ["a", "b", "c", "d"]}), encoding="utf-8"
+        )
+        result_paths[objective] = result_path
+
+    output = tmp_path / "ablation"
+    subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "report_ours_objective_ablation.py"),
+            "--pairwise-result",
+            str(result_paths["pairwise"]),
+            "--ce-result",
+            str(result_paths["ce"]),
+            "--output-dir",
+            str(output),
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    report = (output / "OBJECTIVE_ABLATION.md").read_text()
+    payload = json.loads((output / "objective_ablation.json").read_text())
+    assert "Controlled comparison check: **pass**" in report
+    assert payload["same_selected_ids_in_same_order"] is True
+    assert payload["metrics"][0]["pairwise_minus_ce"] == pytest.approx(0.05)

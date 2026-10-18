@@ -4,3 +4,4 @@ extends: main_hypothesis_discovery.yaml
 # hypotheses so controlled verification is substantially cheaper.
 hypothesis_generation:
   max_hypotheses: 3
+  prompt_version: failure_discovery_v2

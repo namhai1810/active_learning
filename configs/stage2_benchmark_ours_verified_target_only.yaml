@@ -1,0 +1,10 @@
+extends: stage2_benchmark.yaml
+
+# Keep target-only development artifacts separate from the original
+# strict-joint ours_verified run.
+stage2_benchmark:
+  synthetic_artifacts:
+    ours_verified:
+      accepted: outputs/stage2_acquisition_ours_verified_target_only/seed_{seed}/synthetic/accepted.jsonl
+      provenance: outputs/stage2_acquisition_ours_verified_target_only/seed_{seed}/synthetic/manifest.json
+      teacher_calls_dir: outputs/stage2_acquisition_ours_verified_target_only/seed_{seed}/teacher_calls

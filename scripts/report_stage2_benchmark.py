@@ -390,6 +390,16 @@ def main() -> None:
             "any_shortage": any(bool(item["shortage"]) for item in group),
             "any_abstained": bool(abstained_seeds),
             "abstained_seeds": abstained_seeds,
+            "any_adaptive_stopped": any(
+                bool(item.get("adaptive_stopped", False)) for item in group
+            ),
+            "adaptive_stop_reasons": sorted(
+                {
+                    str(item["adaptive_stop_reason"])
+                    for item in group
+                    if item.get("adaptive_stop_reason")
+                }
+            ),
             "comparable_seeds": comparable_seeds,
             "all_fixed_budget_comparable": len(comparable_seeds) == len(group),
             "any_leakage_audit_failure": any(
@@ -402,7 +412,12 @@ def main() -> None:
                 [
                     item
                     for item in group
-                    if bool(item.get("fixed_budget_comparable", True))
+                    if bool(
+                        item.get(
+                            "final_metrics_reportable",
+                            item.get("fixed_budget_comparable", True),
+                        )
+                    )
                 ]
                 if path.startswith(("hans_final.", "mnli."))
                 else group
@@ -417,10 +432,15 @@ def main() -> None:
         summaries.append(row)
 
     curve_groups: dict[
-        tuple[str, str, int, int, int], list[dict[str, Any]]
+        tuple[str, str, int, str, int, int], list[dict[str, Any]]
     ] = defaultdict(list)
     for result_path, result in result_entries:
-        if not bool(result.get("fixed_budget_comparable", True)):
+        if not bool(
+            result.get(
+                "final_metrics_reportable",
+                result.get("fixed_budget_comparable", True),
+            )
+        ):
             continue
         curve_name = str(result.get("learning_curve_file", ""))
         if not curve_name:
@@ -429,19 +449,25 @@ def main() -> None:
         points = curve.get("points")
         if not isinstance(points, list) or not points:
             raise ValueError(f"Run has no learning curve points: {result_path}")
+        expected_role = str(result.get("learning_curve_evaluation_role", "gain_eval"))
+        if expected_role not in {"gain_eval", "stopping_eval"}:
+            raise ValueError(f"Unsupported learning curve role: {expected_role}")
         for point in points:
-            if not isinstance(point, dict) or point.get("evaluation_role") != "gain_eval":
-                raise ValueError(f"Learning curve must use gain_eval: {result_path}")
+            if not isinstance(point, dict) or point.get("evaluation_role") != expected_role:
+                raise ValueError(
+                    f"Learning curve role differs from result metadata: {result_path}"
+                )
             key = (
                 str(result["experiment"]),
                 str(result["method"]),
                 int(result["requested_budget"]),
+                expected_role,
                 int(point["round"]),
                 int(point["cumulative_final_training_examples"]),
             )
             curve_groups[key].append(point)
     curve_summaries: list[dict[str, Any]] = []
-    for (experiment, method, budget, round_index, examples), points in sorted(
+    for (experiment, method, budget, role, round_index, examples), points in sorted(
         curve_groups.items()
     ):
         curve_summaries.append(
@@ -449,6 +475,7 @@ def main() -> None:
                 "experiment": experiment,
                 "method": method,
                 "budget": budget,
+                "evaluation_role": role,
                 "round": round_index,
                 "cumulative_final_training_examples": examples,
                 "gain_eval_overall_accuracy": _summary(
@@ -465,6 +492,41 @@ def main() -> None:
                 ),
             }
         )
+
+    verification_by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
+    for result in results:
+        provenance = result.get("synthetic_provenance")
+        if not isinstance(provenance, dict):
+            continue
+        verification = provenance.get("verification_summary")
+        if not isinstance(verification, dict):
+            continue
+        diagnostic_results = verification.get("results")
+        if not isinstance(diagnostic_results, list):
+            continue
+        for diagnostic in diagnostic_results:
+            if not isinstance(diagnostic, dict):
+                continue
+            hypothesis_id = str(diagnostic.get("hypothesis_id", ""))
+            if not hypothesis_id:
+                continue
+            key = (
+                str(result["method"]),
+                int(result["seed"]),
+                hypothesis_id,
+            )
+            verification_by_key[key] = {
+                "method": str(result["method"]),
+                "seed": int(result["seed"]),
+                "verification_protocol_version": verification.get(
+                    "verification_protocol_version"
+                ),
+                "certification_metric": verification.get("certification_metric"),
+                **diagnostic,
+            }
+    verification_diagnostics = [
+        verification_by_key[key] for key in sorted(verification_by_key)
+    ]
     write_json(
         output / "stage2_summary.json",
         {
@@ -474,8 +536,16 @@ def main() -> None:
                 "across completed seeds; n is reported and no missing seed is imputed."
             ),
             "groups": summaries,
-            "learning_curve_role": "gain_eval",
+            "learning_curve_role": (
+                next(iter({item["evaluation_role"] for item in curve_summaries}))
+                if len({item["evaluation_role"] for item in curve_summaries}) == 1
+                else "mixed"
+            ),
+            "learning_curve_roles": sorted(
+                {item["evaluation_role"] for item in curve_summaries}
+            ),
             "learning_curves": curve_summaries,
+            "verification_diagnostics": verification_diagnostics,
         },
     )
     csv_path = output / "stage2_summary.csv"
@@ -553,6 +623,8 @@ def main() -> None:
     _write_final_accuracy_figure(summaries, figures)
     _write_learning_curve_figure(curve_summaries, figures)
     _write_cost_accuracy_figure(summaries, figures)
+    curve_roles = sorted({item["evaluation_role"] for item in curve_summaries})
+    curve_role_label = ", ".join(curve_roles) if curve_roles else "unknown"
     lines = [
         "# Stage 2 benchmark report",
         "",
@@ -561,11 +633,13 @@ def main() -> None:
         "Random/Uncertainty are MNLI cross-source baselines; equal data access with "
         "HANS-guided synthetic methods is not claimed. Random-synthetic and the "
         "no-verification ablation use pairs for selection but train with per-example "
-        "cross-entropy. Ours uses token cross-entropy plus counterfactual contrastive "
-        "and invariant consistency losses.",
+        "cross-entropy. The objective used by ours is recorded per run.",
         "Runs that abstain because no failure hypothesis is certified are retained "
         "as protocol outcomes and costs, but are excluded from equal-budget "
         "accuracy figures and learning-curve comparisons.",
+        "For an adaptive-budget run, Budget is the configured maximum and Actual "
+        "train is the stopping budget. Its final metrics are reportable, but it is "
+        "not claimed to be a fixed-budget comparison when it stops early.",
         "",
         "![Experiment A final HANS accuracy](figures/experiment_a_final_hans_accuracy.svg)",
         "",
@@ -588,6 +662,8 @@ def main() -> None:
                 status=(
                     "ABSTAINED"
                     if item["any_abstained"]
+                    else "ADAPTIVE STOP"
+                    if item["any_adaptive_stopped"]
                     else "complete"
                 ),
                 hans=fmt(item["hans_final.overall_accuracy"]),
@@ -602,20 +678,175 @@ def main() -> None:
                 ),
             )
         )
+    if verification_diagnostics:
+        def verification_percentage(value: Any) -> str:
+            return "NA" if value is None else f"{100.0 * float(value):.2f}%"
+
+        lines.extend(
+            [
+                "",
+                "## Verification diagnostics",
+                "",
+                "Certification uses the declared metric. Strict-joint and control "
+                "accuracies are diagnostic and do not gate target-failure "
+                "certification.",
+                "",
+                "| Seed | Hypothesis | Metric | Target rate / LCB | Strict-joint rate / LCB | Counterfactual | Invariant | Stop | Certified |",
+                "|---:|---|---|---:|---:|---:|---:|---|---|",
+            ]
+        )
+        for item in verification_diagnostics:
+            diagnostics = item.get("diagnostics", {})
+            target = diagnostics.get("target_failure", {})
+            strict = diagnostics.get("strict_joint", {})
+            controls = diagnostics.get("controls", {})
+            counterfactual = controls.get("counterfactual", {})
+            invariant = controls.get("invariant", {})
+            lines.append(
+                "| {seed} | {name} | {metric} | {target_rate} / {target_lcb} | "
+                "{strict_rate} / {strict_lcb} | {counterfactual} | {invariant} | "
+                "{stop} | {certified} |".format(
+                    seed=item["seed"],
+                    name=item.get("hypothesis_name", item["hypothesis_id"]),
+                    metric=item.get("certification_metric", "unknown"),
+                    target_rate=verification_percentage(target.get("nu_hat")),
+                    target_lcb=verification_percentage(target.get("lower_bound")),
+                    strict_rate=verification_percentage(strict.get("nu_hat")),
+                    strict_lcb=verification_percentage(strict.get("lower_bound")),
+                    counterfactual=verification_percentage(
+                        counterfactual.get("accuracy")
+                    ),
+                    invariant=verification_percentage(invariant.get("accuracy")),
+                    stop=item.get("probe_design", {}).get(
+                        "stop_reason", "one_shot"
+                    ),
+                    certified="yes" if item.get("certified") is True else "no",
+                )
+            )
+    adaptive_results = [
+        result for result in results if bool(result.get("adaptive_budget_protocol", False))
+    ]
+    if adaptive_results:
+        lines.extend(
+            [
+                "",
+                "## Adaptive stopping",
+                "",
+                "Stopping decisions use the evaluation role recorded for each run; "
+                "the sealed final test is not used. Confidence bounds are diagnostic "
+                "and adjusted for the predeclared maximum number of looks.",
+                "",
+                "| Seed | Maximum budget | Selected budget | Completed stages | Decision | Last marginal gain / UCB |",
+                "|---:|---:|---:|---:|---|---:|",
+            ]
+        )
+        for result in sorted(adaptive_results, key=lambda item: int(item["seed"])):
+            stopping = result.get("adaptive_stopping", {})
+            decision = stopping.get("last_decision") or {}
+            gain = decision.get("paired_gain") or {}
+            mean = gain.get("mean_gain")
+            upper = gain.get("upper_bound")
+            gain_text = (
+                "NA"
+                if mean is None or upper is None
+                else f"{100.0 * float(mean):.3f}% / {100.0 * float(upper):.3f}%"
+            )
+            lines.append(
+                "| {seed} | {maximum} | {actual} | {rounds} | {decision} | {gain} |".format(
+                    seed=result["seed"],
+                    maximum=result["requested_budget"],
+                    actual=result["actual_final_training_examples"],
+                    rounds=stopping.get("completed_rounds", "NA"),
+                    decision=(
+                        result.get("adaptive_stop_reason")
+                        or decision.get("reason", "maximum_budget_reached")
+                    ),
+                    gain=gain_text,
+                )
+            )
+
+    gain_report_results = [
+        result for result in results if isinstance(result.get("gain_report"), dict)
+    ]
+    if gain_report_results:
+        lines.extend(
+            [
+                "",
+                "## Held-out gain report",
+                "",
+                "This partition is disjoint from `stopping_eval` and is evaluated "
+                "once, only after checkpoint selection.",
+                "",
+                "| Seed | Examples | Accuracy | Non-entailment accuracy |",
+                "|---:|---:|---:|---:|",
+            ]
+        )
+        for result in sorted(gain_report_results, key=lambda item: int(item["seed"])):
+            metrics = result["gain_report"]
+            lines.append(
+                "| {seed} | {n} | {accuracy:.4f} | {nonent:.4f} |".format(
+                    seed=result["seed"],
+                    n=int(metrics["num_examples"]),
+                    accuracy=float(metrics["overall_accuracy"]),
+                    nonent=float(metrics["non_entailment_accuracy"]),
+                )
+            )
+    v3_results = [
+        result
+        for result in results
+        if result.get("ours_selection_strategy")
+        == "verification_conditioned_primal_dual_v1"
+        and isinstance(result.get("ours_selection_diagnostics"), dict)
+    ]
+    if v3_results:
+        lines.extend(
+            [
+                "",
+                "## Verification-conditioned sampling",
+                "",
+                "Target proportions are learned from certified failure evidence. "
+                "Control accuracy enters only as a soft specificity signal; there "
+                "are no hard per-label or per-hypothesis quotas.",
+                "",
+                "| Seed | Learned label target (E/N/C) | Selected labels (E/N/C) | Selected hypothesis pairs |",
+                "|---:|---:|---:|---|",
+            ]
+        )
+        for result in sorted(v3_results, key=lambda item: int(item["seed"])):
+            diagnostics = result["ours_selection_diagnostics"]
+            target = diagnostics.get("target_label_distribution", {})
+            counts = diagnostics.get("label_counts", {})
+            hypothesis_counts = diagnostics.get("hypothesis_pair_counts", {})
+            lines.append(
+                "| {seed} | {e:.3f}/{n:.3f}/{c:.3f} | {ec}/{nc}/{cc} | {hypotheses} |".format(
+                    seed=result["seed"],
+                    e=float(target.get("entailment", 0.0)),
+                    n=float(target.get("neutral", 0.0)),
+                    c=float(target.get("contradiction", 0.0)),
+                    ec=int(counts.get("entailment", 0)),
+                    nc=int(counts.get("neutral", 0)),
+                    cc=int(counts.get("contradiction", 0)),
+                    hypotheses=", ".join(
+                        f"{key}:{value}" for key, value in sorted(hypothesis_counts.items())
+                    ),
+                )
+            )
+
     lines.extend(
         [
             "",
-            "## Post-hoc learning curves (`gain_eval`)",
+            f"## Learning curves (`{curve_role_label}`)",
             "",
-            "| Exp. | Method | Budget | Round | Cumulative examples | Accuracy | Cumulative cost |",
-            "|---|---|---:|---:|---:|---:|---:|",
+            "| Exp. | Method | Role | Budget | Round | Cumulative examples | Accuracy | Cumulative cost |",
+            "|---|---|---|---:|---:|---:|---:|---:|",
         ]
     )
     for item in curve_summaries:
         lines.append(
-            "| {experiment} | {method} | {budget} | {round} | {examples} | {accuracy} | {cost} |".format(
+            "| {experiment} | {method} | {role} | {budget} | {round} | {examples} | {accuracy} | {cost} |".format(
                 experiment=item["experiment"],
                 method=item["method"],
+                role=item["evaluation_role"],
                 budget=item["budget"],
                 round=item["round"],
                 examples=item["cumulative_final_training_examples"],
@@ -626,8 +857,8 @@ def main() -> None:
     lines.extend(
         [
             "",
-            "The learning curve uses `gain_eval`; the sealed HANS final-test is "
-            "evaluated once on the final checkpoint only.",
+            f"The learning curve uses `{curve_role_label}`; the sealed HANS "
+            "final-test is evaluated once on the final checkpoint only.",
             "",
             "Intervals are descriptive across seeds and use a normal approximation; "
             "with three seeds they should not be interpreted as strong coverage guarantees.",
