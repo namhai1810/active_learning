@@ -313,3 +313,78 @@ class QwenNLIStudent:
                 refresh=False,
             )
         return probabilities
+
+    def encode_pair_embeddings(
+        self,
+        premises: Sequence[str],
+        hypotheses: Sequence[str],
+        batch_size: int = 4,
+    ) -> list[list[float]]:
+        """Return normalized contextual embeddings for premise-hypothesis pairs.
+
+        Mean pooling over the final hidden layer uses the same formatted prompt
+        as NLI scoring.  Embeddings are moved to CPU batch-by-batch so novelty
+        selection does not retain a second model or a GPU-sized feature matrix.
+        """
+        if len(premises) != len(hypotheses):
+            raise ValueError("premises and hypotheses must have the same length")
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+
+        from tqdm.auto import tqdm
+
+        torch = self._torch
+        num_examples = len(premises)
+        num_batches = (num_examples + batch_size - 1) // batch_size
+        label = getattr(self, "progress_label", "NLI embedding extraction")
+        print(
+            f"[PROGRESS] {label}: {num_examples:,} examples, "
+            f"{num_batches:,} batches (batch_size={batch_size})"
+        )
+        embeddings: list[list[float]] = []
+        batch_starts = tqdm(
+            range(0, num_examples, batch_size),
+            total=num_batches,
+            desc=label,
+            unit="batch",
+            dynamic_ncols=True,
+            mininterval=2.0,
+        )
+        for start in batch_starts:
+            prompts = [
+                self.format_prompt(premise, hypothesis)
+                for premise, hypothesis in zip(
+                    premises[start : start + batch_size],
+                    hypotheses[start : start + batch_size],
+                    strict=True,
+                )
+            ]
+            encoded = self.tokenizer(
+                prompts,
+                add_special_tokens=False,
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors="pt",
+            )
+            input_ids = encoded["input_ids"].to(self.input_device)
+            attention_mask = encoded["attention_mask"].to(self.input_device)
+            with torch.inference_mode():
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                    use_cache=False,
+                    return_dict=True,
+                )
+                hidden = outputs.hidden_states[-1].float()
+                mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
+                pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
+                pooled = torch.nn.functional.normalize(pooled, p=2, dim=-1)
+            embeddings.extend(pooled.cpu().tolist())
+            del outputs, hidden, mask, pooled, input_ids, attention_mask
+            batch_starts.set_postfix(
+                examples=f"{min(start + batch_size, num_examples):,}/{num_examples:,}",
+                refresh=False,
+            )
+        return embeddings

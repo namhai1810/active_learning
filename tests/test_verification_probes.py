@@ -10,6 +10,7 @@ from src.verification.generated_probes import (
     TeacherVerificationProbeValidator,
     _normalized_pair_text,
     _parse_generated_probe_batch,
+    predict_probe_sets,
 )
 from scripts.verify_hypotheses import (
     _adaptive_action,
@@ -91,6 +92,23 @@ def _parse(response: dict[str, object], **kwargs):
     )
 
 
+def _target_only_response() -> dict[str, object]:
+    return {
+        "probe_sets": [
+            {
+                "seed_context_ids": ["verification-1"],
+                "mechanism_rationale": "The role reversal directly tests the failure.",
+                "target": _probe(
+                    "The baker thanked the courier.",
+                    "The courier thanked the baker.",
+                    "neutral",
+                    "entailment",
+                ),
+            }
+        ]
+    }
+
+
 def test_generated_probe_parser_accepts_three_distinct_pairs():
     probes = _parse(_response())
 
@@ -99,6 +117,90 @@ def test_generated_probe_parser_accepts_three_distinct_pairs():
         "counterfactual_control",
         "invariant_control",
     ]
+
+
+def test_generated_probe_parser_accepts_target_only_design():
+    probes = _parse_generated_probe_batch(
+        _target_only_response(),
+        hypothesis=_hypothesis(),
+        permitted_ids={"verification-1"},
+        requested=1,
+        ordinal_start=0,
+        prompt_version="target_only_verification_probes_v1",
+        probe_types=("target",),
+    )
+    assert len(probes) == 1
+    assert probes[0].probe_type == "target"
+
+
+def test_target_only_prediction_exposes_no_fake_control_or_joint_outcome():
+    probes = _parse_generated_probe_batch(
+        _target_only_response(),
+        hypothesis=_hypothesis(),
+        permitted_ids={"verification-1"},
+        requested=1,
+        ordinal_start=0,
+        prompt_version="target_only_verification_probes_v1",
+        probe_types=("target",),
+    )
+
+    class EntailmentStudent:
+        def predict(self, premises, hypotheses, batch_size):
+            return ["entailment"] * len(premises)
+
+    predictions, outcomes = predict_probe_sets(
+        _hypothesis(), probes, EntailmentStudent(), batch_size=1
+    )
+    assert len(predictions) == 1
+    assert outcomes[0]["target_failure_observed"] is True
+    assert outcomes[0]["counterfactual_control_correct"] is None
+    assert outcomes[0]["invariant_control_correct"] is None
+    assert outcomes[0]["strict_joint_z"] is None
+    assert outcomes[0]["probe_design"] == "target_only"
+    with pytest.raises(ValueError, match="unavailable"):
+        _metric_outcomes(outcomes, "strict_joint")
+
+
+def test_target_only_generator_requests_and_counts_one_probe_per_set():
+    class QueueTeacher:
+        def __init__(self):
+            self.calls = []
+
+        def generate_json(self, call):
+            self.calls.append(call)
+            return _target_only_response()
+
+    teacher = QueueTeacher()
+    generator = ControlledVerificationProbeGenerator(
+        teacher,
+        ControlledProbeConfig(
+            n_probe_sets=1,
+            min_valid_probe_sets=1,
+            max_context_records=1,
+            max_probe_sets_per_call=1,
+            max_attempts_per_batch=1,
+            prompt_version="target_only_verification_probes_v1",
+            probe_design="target_only",
+        ),
+    )
+    probes, log = generator.generate(
+        _hypothesis(),
+        [
+            {
+                "id": "verification-1",
+                "premise": "A pilot slept quietly.",
+                "hypothesis": "A person slept.",
+                "gold": "entailment",
+                "split_role": "verification",
+            }
+        ],
+    )
+    schema = teacher.calls[0].payload["output_schema"]["probe_sets"][0]
+    assert set(schema) == {"seed_context_ids", "mechanism_rationale", "target"}
+    assert len(probes) == 1
+    assert log["generated_probe_sets"] == 1
+    assert log["probes_per_set"] == 1
+    assert log["probe_design"] == "target_only"
 
 
 def test_generated_probe_parser_rejects_duplicate_within_set_before_qc():

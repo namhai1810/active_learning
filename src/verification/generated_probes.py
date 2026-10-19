@@ -23,8 +23,14 @@ from tqdm.auto import tqdm
 
 VERIFICATION_PROBE_PROMPT_VERSION = "controlled_verification_probes_v3"
 PRE_QC_INDEPENDENCE_PROMPT_VERSION = "controlled_verification_probes_v4"
+TARGET_ONLY_PROMPT_VERSION = "target_only_verification_probes_v1"
 VERIFICATION_LABEL_PROMPT_VERSION = "verification_probe_validation_v1"
 PROBE_TYPES = ("target", "counterfactual_control", "invariant_control")
+TARGET_ONLY_PROBE_TYPES = ("target",)
+PROBE_DESIGNS = {
+    "controlled_triplet": PROBE_TYPES,
+    "target_only": TARGET_ONLY_PROBE_TYPES,
+}
 _SCENARIO_DOMAINS = (
     "marine research vessel",
     "pottery workshop",
@@ -91,6 +97,7 @@ class ControlledProbeConfig:
     near_duplicate_threshold: float = 0.92
     seed: int = 42
     prompt_version: str = VERIFICATION_PROBE_PROMPT_VERSION
+    probe_design: str = "controlled_triplet"
 
     def __post_init__(self) -> None:
         if self.n_probe_sets <= 0:
@@ -105,6 +112,18 @@ class ControlledProbeConfig:
             raise ValueError("Probe near_duplicate_threshold must be in (0, 1]")
         if not self.prompt_version.strip():
             raise ValueError("Probe prompt_version must be non-empty")
+        if self.probe_design not in PROBE_DESIGNS:
+            raise ValueError(
+                "probe_design must be controlled_triplet or target_only"
+            )
+
+    @property
+    def probe_types(self) -> tuple[str, ...]:
+        return PROBE_DESIGNS[self.probe_design]
+
+    @property
+    def probes_per_set(self) -> int:
+        return len(self.probe_types)
 
 
 @dataclass(frozen=True)
@@ -300,6 +319,7 @@ def _parse_generated_probe_batch(
     prompt_version: str,
     forbidden_pairs: Mapping[str, str] | None = None,
     near_duplicate_threshold: float = 0.92,
+    probe_types: Sequence[str] = PROBE_TYPES,
 ) -> list[VerificationProbe]:
     if not 0.0 < near_duplicate_threshold <= 1.0:
         raise ValueError("Probe near_duplicate_threshold must be in (0, 1]")
@@ -309,6 +329,9 @@ def _parse_generated_probe_batch(
         raise ValueError("Probe generator response must contain only probe_sets[]")
     if len(response["probe_sets"]) != requested:
         raise ValueError("Probe generator returned a different set count")
+    selected_probe_types = tuple(probe_types)
+    if selected_probe_types not in PROBE_DESIGNS.values():
+        raise ValueError("Unsupported generated-probe design")
     parsed: list[VerificationProbe] = []
     observed_pairs = dict(forbidden_pairs or {})
     observed_signatures = [
@@ -319,7 +342,7 @@ def _parse_generated_probe_batch(
         expected_set_fields = {
             "seed_context_ids",
             "mechanism_rationale",
-            *PROBE_TYPES,
+            *selected_probe_types,
         }
         if not isinstance(raw_set, dict):
             raise ValueError("Generated probe set must be a JSON object")
@@ -341,7 +364,7 @@ def _parse_generated_probe_batch(
         if not seed_ids or not set(seed_ids) <= permitted_ids:
             raise ValueError("Generated probe cites a non-permitted context ID")
         raw_probes = []
-        for probe_type in PROBE_TYPES:
+        for probe_type in selected_probe_types:
             raw = raw_set[probe_type]
             if not isinstance(raw, dict):
                 raise ValueError(f"Generated {probe_type} probe must be a JSON object")
@@ -362,10 +385,10 @@ def _parse_generated_probe_batch(
             normalized_pairs.append(
                 _normalized_pair_text(raw["premise"], raw["hypothesis"])
             )
-        if len(set(normalized_pairs)) != len(PROBE_TYPES):
+        if len(set(normalized_pairs)) != len(selected_probe_types):
             raise ValueError(
-                "Target, counterfactual control, and invariant control must use "
-                "three pairwise-distinct premise-hypothesis pairs"
+                "All probes within a set must use pairwise-distinct "
+                "premise-hypothesis pairs"
             )
         for pair in normalized_pairs:
             if pair in observed_pairs:
@@ -383,7 +406,9 @@ def _parse_generated_probe_batch(
         set_id = _probe_set_id(
             hypothesis.id, raw_probes, ordinal_start + set_offset
         )
-        for probe_type, raw in zip(PROBE_TYPES, raw_probes, strict=True):
+        for probe_type, raw in zip(
+            selected_probe_types, raw_probes, strict=True
+        ):
             text_fields = (
                 "premise",
                 "hypothesis",
@@ -410,7 +435,8 @@ def _parse_generated_probe_batch(
                     "expected_label."
                 )
             if (
-                prompt_version == PRE_QC_INDEPENDENCE_PROMPT_VERSION
+                prompt_version
+                in {PRE_QC_INDEPENDENCE_PROMPT_VERSION, TARGET_ONLY_PROMPT_VERSION}
                 and _normalized_sentence(str(raw["premise"]))
                 == _normalized_sentence(str(raw["hypothesis"]))
                 and expected_label != "entailment"
@@ -444,7 +470,7 @@ def _parse_generated_probe_batch(
                 )
             )
         for probe, pair in zip(
-            parsed[-len(PROBE_TYPES) :], normalized_pairs, strict=True
+            parsed[-len(selected_probe_types) :], normalized_pairs, strict=True
         ):
             observed_pairs[pair] = probe.id
             observed_signatures.append((_token_set(pair), probe.id))
@@ -482,12 +508,12 @@ class ControlledVerificationProbeGenerator:
         expected_set_fields = {
             "seed_context_ids",
             "mechanism_rationale",
-            *PROBE_TYPES,
+            *self.config.probe_types,
         }
         for set_index, raw_set in enumerate(repaired["probe_sets"]):
             if not isinstance(raw_set, dict) or set(raw_set) != expected_set_fields:
                 return response
-            for probe_type in PROBE_TYPES:
+            for probe_type in self.config.probe_types:
                 raw = raw_set.get(probe_type)
                 if not isinstance(raw, dict) or set(raw) != _RAW_PROBE_FIELDS:
                     return response
@@ -679,9 +705,20 @@ class ControlledVerificationProbeGenerator:
             for record in context
         }
         strict_independence = (
-            self.config.prompt_version == PRE_QC_INDEPENDENCE_PROMPT_VERSION
+            self.config.prompt_version
+            in {PRE_QC_INDEPENDENCE_PROMPT_VERSION, TARGET_ONLY_PROMPT_VERSION}
         )
-        if strict_independence:
+        target_only = self.config.probe_design == "target_only"
+        if target_only:
+            system_prompt = (
+                "Generate NEW target-only three-class NLI verification probes for "
+                "one pre-registered failure hypothesis. Each probe set must contain "
+                "exactly one target and no controls. Sets must use independent "
+                "scenarios and must not copy, lightly paraphrase, or reuse pairs "
+                "from context or earlier sets. State labels before any student is "
+                "queried. Return one standalone JSON object and no markdown."
+            )
+        elif strict_independence:
             system_prompt = (
                 "Generate NEW controlled three-class NLI verification probes for one "
                 "pre-registered failure hypothesis. Each probe set must contain exactly "
@@ -733,7 +770,11 @@ class ControlledVerificationProbeGenerator:
                 str(record["id"]) for record in batch_context
             }
             payload = {
-                "task": "generate_controlled_hypothesis_verification_probes",
+                "task": (
+                    "generate_target_only_hypothesis_verification_probes"
+                    if target_only
+                    else "generate_controlled_hypothesis_verification_probes"
+                ),
                 "failure_hypothesis": {
                     "id": hypothesis.id,
                     "description": hypothesis.description,
@@ -757,13 +798,6 @@ class ControlledVerificationProbeGenerator:
                         "satisfies the hypothesized mechanism; expected_failure_label "
                         "must be one declared predicted failure label and must be wrong"
                     ),
-                    "counterfactual_control": (
-                        "minimal mechanism-relevant change for which correct behavior "
-                        "distinguishes the proposed mechanism"
-                    ),
-                    "invariant_control": (
-                        "irrelevant entity or surface changes preserve the correct label"
-                    ),
                     "all_labels": list(MNLI_LABELS),
                     "label_semantics": (
                         "expected_label is the gold three-class MNLI label and MUST "
@@ -775,7 +809,6 @@ class ControlledVerificationProbeGenerator:
                         "or contradiction. If the target failure label is "
                         "non-entailment, its gold expected_label must be entailment."
                     ),
-                    "controls_expected_failure_label": None,
                     **(
                         {
                             "within_set_distinctness": (
@@ -793,8 +826,28 @@ class ControlledVerificationProbeGenerator:
                                 "identical-sentence shortcut."
                             ),
                         }
-                        if strict_independence
+                        if strict_independence and not target_only
                         else {}
+                    ),
+                    **(
+                        {
+                            "no_controls": (
+                                "Return only the target probe. Do not generate "
+                                "counterfactual_control or invariant_control fields."
+                            )
+                        }
+                        if target_only
+                        else {
+                            "counterfactual_control": (
+                                "minimal mechanism-relevant change for which correct "
+                                "behavior distinguishes the proposed mechanism"
+                            ),
+                            "invariant_control": (
+                                "irrelevant entity or surface changes preserve the "
+                                "correct label"
+                            ),
+                            "controls_expected_failure_label": None,
+                        }
                     ),
                     "originality": (
                         "Every set must instantiate its corresponding scenario "
@@ -812,7 +865,11 @@ class ControlledVerificationProbeGenerator:
                     "probe_sets": [
                         {
                             "seed_context_ids": ["one or more supplied IDs"],
-                            "mechanism_rationale": "why the three probes form one test",
+                            "mechanism_rationale": (
+                                "why the target tests the failure mechanism"
+                                if target_only
+                                else "why the three probes form one test"
+                            ),
                             "target": {
                                 "premise": "new sentence",
                                 "hypothesis": "new sentence",
@@ -821,22 +878,28 @@ class ControlledVerificationProbeGenerator:
                                 "label_rationale": "why the expected label is valid",
                                 "constraint_rationale": "why this is a target probe",
                             },
-                            "counterfactual_control": {
-                                "premise": "new sentence",
-                                "hypothesis": "new sentence",
-                                "expected_label": "entailment | neutral | contradiction",
-                                "expected_failure_label": None,
-                                "label_rationale": "why the expected label is valid",
-                                "constraint_rationale": "why this is a counterfactual control",
-                            },
-                            "invariant_control": {
-                                "premise": "new sentence",
-                                "hypothesis": "new sentence",
-                                "expected_label": "entailment | neutral | contradiction",
-                                "expected_failure_label": None,
-                                "label_rationale": "why the expected label is valid",
-                                "constraint_rationale": "why this is an invariant control",
-                            },
+                            **(
+                                {}
+                                if target_only
+                                else {
+                                    "counterfactual_control": {
+                                        "premise": "new sentence",
+                                        "hypothesis": "new sentence",
+                                        "expected_label": "entailment | neutral | contradiction",
+                                        "expected_failure_label": None,
+                                        "label_rationale": "why the expected label is valid",
+                                        "constraint_rationale": "why this is a counterfactual control",
+                                    },
+                                    "invariant_control": {
+                                        "premise": "new sentence",
+                                        "hypothesis": "new sentence",
+                                        "expected_label": "entailment | neutral | contradiction",
+                                        "expected_failure_label": None,
+                                        "label_rationale": "why the expected label is valid",
+                                        "constraint_rationale": "why this is an invariant control",
+                                    },
+                                }
+                            ),
                         }
                     ]
                 },
@@ -856,24 +919,40 @@ class ControlledVerificationProbeGenerator:
             for attempt in range(self.config.max_attempts_per_batch):
                 attempt_payload = dict(payload)
                 if last_error is not None:
+                    expected_set_keys = (
+                        "seed_context_ids, mechanism_rationale, target"
+                        if target_only
+                        else (
+                            "seed_context_ids, mechanism_rationale, target, "
+                            "counterfactual_control, invariant_control"
+                        )
+                    )
+                    distinctness_instruction = (
+                        "Do not include any control field. "
+                        if target_only
+                        else (
+                            "The target, counterfactual control, and invariant "
+                            "control premise-hypothesis pairs must be pairwise "
+                            "distinct. "
+                        )
+                    )
                     retry_correction: dict[str, Any] = {
                         "previous_response_rejected_because": str(last_error),
                         "mandatory_instruction": (
                             "Return exactly one top-level key named probe_sets, with "
                             f"exactly {requested} set(s). Do not echo batch_index, "
                             "failure_hypothesis, requirements, or any other input key. "
-                            "Every set must contain exactly these five keys: "
-                            "seed_context_ids, mechanism_rationale, target, "
-                            "counterfactual_control, invariant_control. "
+                            "Every set must contain exactly these keys: "
+                            f"{expected_set_keys}. "
                             "seed_context_ids must be a non-empty list containing only "
                             f"IDs from {sorted(batch_permitted_ids)!r}. Every "
                             "target/control "
                             "must contain exactly these six keys: premise, hypothesis, "
                             "expected_label, expected_failure_label, label_rationale, "
                             "constraint_rationale. Never omit premise or "
-                            "seed_context_ids. The target, counterfactual control, "
-                            "and invariant control premise-hypothesis pairs must be "
-                            "pairwise distinct. expected_label MUST be exactly one of "
+                            "seed_context_ids. "
+                            f"{distinctness_instruction}"
+                            "expected_label MUST be exactly one of "
                             "entailment, neutral, contradiction; never put the binary "
                             "label non-entailment in expected_label. Use "
                             "expected_failure_label only for the target."
@@ -964,10 +1043,14 @@ class ControlledVerificationProbeGenerator:
                                 for probe in (*prior_probes, *generated)
                             }
                             if self.config.prompt_version
-                            == PRE_QC_INDEPENDENCE_PROMPT_VERSION
+                            in {
+                                PRE_QC_INDEPENDENCE_PROMPT_VERSION,
+                                TARGET_ONLY_PROMPT_VERSION,
+                            }
                             else None
                         ),
                         near_duplicate_threshold=self.config.near_duplicate_threshold,
+                        probe_types=self.config.probe_types,
                     )
                 except ValueError as exc:
                     logs.append(
@@ -1049,7 +1132,9 @@ class ControlledVerificationProbeGenerator:
             "ordinal_start": generation_start_ordinal,
             "ordinal_end": next_set_ordinal,
             "attempted_probe_sets": next_set_ordinal - generation_start_ordinal,
-            "generated_probe_sets": len(generated) // len(PROBE_TYPES),
+            "generated_probe_sets": len(generated) // self.config.probes_per_set,
+            "probe_design": self.config.probe_design,
+            "probes_per_set": self.config.probes_per_set,
             "failed_generation_probe_sets": failed_probe_sets,
             "student_outcomes_in_teacher_prompt": False,
             "calls": logs,
@@ -1298,13 +1383,25 @@ def _group_probe_sets(
             raise ValueError("Verification probe IDs must be unique")
         ids.add(probe.id)
         grouped.setdefault(probe.probe_set_id, []).append(probe)
+    observed_designs: set[tuple[str, ...]] = set()
     for set_id, members in grouped.items():
         types = [member.probe_type for member in members]
-        if sorted(types) != sorted(PROBE_TYPES):
+        matching_design = next(
+            (
+                design
+                for design in PROBE_DESIGNS.values()
+                if sorted(types) == sorted(design)
+            ),
+            None,
+        )
+        if matching_design is None:
             raise ValueError(f"Probe set {set_id!r} is incomplete or duplicated")
+        observed_designs.add(matching_design)
         if len({member.hypothesis_id for member in members}) != 1:
             raise ValueError(f"Probe set {set_id!r} mixes hypotheses")
         members.sort(key=lambda item: PROBE_TYPES.index(item.probe_type))
+    if len(observed_designs) > 1:
+        raise ValueError("A probe collection cannot mix target-only and triplet sets")
     return grouped
 
 
@@ -1433,7 +1530,7 @@ def predict_probe_sets(
     *,
     batch_size: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Predict finalized probes and expose target-only and strict-joint outcomes.
+    """Predict finalized probes and expose target-only/optional joint outcomes.
 
     ``z`` remains the historical strict-joint outcome for artifact compatibility.
     Certification code must explicitly choose the configured metric instead of
@@ -1478,35 +1575,53 @@ def predict_probe_sets(
             mnli_to_hans(target_prediction) == target.expected_failure_label
             and mnli_to_hans(target_prediction) != mnli_to_hans(target.expected_label)
         )
+        has_controls = "counterfactual_control" in members
         counterfactual_correct = (
             prediction_by_id[members["counterfactual_control"].id]
             == members["counterfactual_control"].expected_label
+            if has_controls
+            else None
         )
         invariant_correct = (
             prediction_by_id[members["invariant_control"].id]
             == members["invariant_control"].expected_label
+            if has_controls
+            else None
         )
         strict_joint = (
             target_failure
-            and counterfactual_correct
-            and invariant_correct
+            and bool(counterfactual_correct)
+            and bool(invariant_correct)
+            if has_controls
+            else None
         )
         outcomes.append(
             {
                 "hypothesis_id": hypothesis.id,
                 "probe_set_id": set_id,
                 "target_probe_id": target.id,
-                "counterfactual_control_id": members["counterfactual_control"].id,
-                "invariant_control_id": members["invariant_control"].id,
+                "counterfactual_control_id": (
+                    members["counterfactual_control"].id if has_controls else None
+                ),
+                "invariant_control_id": (
+                    members["invariant_control"].id if has_controls else None
+                ),
                 "target_failure_observed": target_failure,
                 "counterfactual_control_correct": counterfactual_correct,
                 "invariant_control_correct": invariant_correct,
                 "target_failure_z": int(target_failure),
-                "strict_joint_z": int(strict_joint),
-                "z": int(strict_joint),
+                "strict_joint_z": (
+                    int(strict_joint) if strict_joint is not None else None
+                ),
+                "z": int(strict_joint) if strict_joint is not None else None,
                 "z_definition": (
                     "target exhibits the predeclared wrong HANS label AND both "
                     "counterfactual/invariant controls receive their exact MNLI labels"
+                    if has_controls
+                    else "not available because this is a target-only probe set"
+                ),
+                "probe_design": (
+                    "controlled_triplet" if has_controls else "target_only"
                 ),
             }
         )

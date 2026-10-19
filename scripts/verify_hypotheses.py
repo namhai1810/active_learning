@@ -58,6 +58,10 @@ def _metric_outcomes(
             f"{sorted(CERTIFICATION_METRICS)}"
         )
     key = "target_failure_observed" if metric == "target_failure" else "z"
+    if any(outcome.get(key) is None for outcome in outcomes):
+        raise ValueError(
+            f"Metric {metric!r} is unavailable for the configured probe design"
+        )
     return [int(bool(outcome[key])) for outcome in outcomes]
 
 
@@ -92,12 +96,27 @@ def _diagnostic_statistic(result: dict[str, Any], metric: str) -> dict[str, Any]
 def _binary_accuracy(
     outcomes: list[dict[str, Any]], key: str
 ) -> dict[str, int | float | None]:
-    n = len(outcomes)
-    correct = sum(bool(outcome[key]) for outcome in outcomes)
+    available = [outcome[key] for outcome in outcomes if outcome.get(key) is not None]
+    n = len(available)
+    correct = sum(bool(value) for value in available)
     return {
         "n": n,
         "correct": correct,
         "accuracy": correct / n if n else None,
+    }
+
+
+def _unavailable_diagnostic(metric: str, reason: str) -> dict[str, Any]:
+    return {
+        "metric": metric,
+        "status": "not_available",
+        "reason": reason,
+        "n": 0,
+        "nu_hat": None,
+        "confidence_radius": None,
+        "lower_bound": None,
+        "meets_threshold": None,
+        "outcome_definition": METRIC_DEFINITIONS[metric],
     }
 
 
@@ -292,19 +311,23 @@ def _run_adaptive_verification(
             K=K,
             T=effective_T,
         )
-        strict_statistic = _verification_statistic(
-            hypothesis.id,
-            outcomes_for_hypothesis,
-            "strict_joint",
-            delta=delta,
-            tau_v=tau_v,
-            K=K,
-            T=effective_T,
+        strict_statistic = (
+            None
+            if probe_config.probe_design == "target_only"
+            else _verification_statistic(
+                hypothesis.id,
+                outcomes_for_hypothesis,
+                "strict_joint",
+                delta=delta,
+                tau_v=tau_v,
+                K=K,
+                T=effective_T,
+            )
         )
         result = dict(
             target_statistic
             if certification_metric == "target_failure"
-            else strict_statistic
+            else strict_statistic or {}
         )
         reliable = len(outcomes_for_hypothesis) >= minimum_valid_probe_sets
         if not reliable:
@@ -318,7 +341,11 @@ def _run_adaptive_verification(
         ]
         result["probe_design"] = {
             "attempted_probe_sets": attempted,
-            "generated_probe_sets": len(generated_for_hypothesis) // 3,
+            "generated_probe_sets": (
+                len(generated_for_hypothesis) // probe_config.probes_per_set
+            ),
+            "probe_design": probe_config.probe_design,
+            "probes_per_set": probe_config.probes_per_set,
             "failed_generation_probe_sets": failed_generation,
             "valid_probe_sets": len(outcomes_for_hypothesis),
             "rejected_probe_sets": len(rejected_set_ids),
@@ -336,8 +363,12 @@ def _run_adaptive_verification(
             "target_failure": _diagnostic_statistic(
                 target_statistic, "target_failure"
             ),
-            "strict_joint": _diagnostic_statistic(
-                strict_statistic, "strict_joint"
+            "strict_joint": (
+                _unavailable_diagnostic(
+                    "strict_joint", "controls_not_generated_in_target_only_design"
+                )
+                if strict_statistic is None
+                else _diagnostic_statistic(strict_statistic, "strict_joint")
             ),
             "controls": {
                 "role": controls_role,
@@ -349,7 +380,7 @@ def _run_adaptive_verification(
                 ),
             },
         }
-        result["z_definition"] = METRIC_DEFINITIONS["strict_joint"]
+        result["z_definition"] = METRIC_DEFINITIONS[certification_metric]
         results.append(result)
 
     write_jsonl(
@@ -364,7 +395,13 @@ def _run_adaptive_verification(
         "mode": "llm_main",
         "oracle_debug": False,
         "verification_mode": "new_controlled_generated_probes",
-        "verification_protocol_version": "target_failure_adaptive_hoeffding_v2",
+        "verification_protocol_version": (
+            "target_failure_target_only_adaptive_hoeffding_v1"
+            if probe_config.probe_design == "target_only"
+            else "target_failure_adaptive_hoeffding_v2"
+        ),
+        "probe_design": probe_config.probe_design,
+        "probes_per_set": probe_config.probes_per_set,
         "certification_metric": certification_metric,
         "controls_role": controls_role,
         "split_version": HANS_FIVE_WAY_SPLIT_VERSION,
@@ -540,6 +577,9 @@ def main() -> None:
                 "probe_prompt_version", "controlled_verification_probes_v3"
             )
         ),
+        probe_design=str(
+            verification.get("probe_design", "controlled_triplet")
+        ),
     )
     validator = TeacherVerificationProbeValidator(
         teacher,
@@ -569,8 +609,14 @@ def main() -> None:
             "verification.certification_metric must be one of "
             f"{sorted(CERTIFICATION_METRICS)}"
         )
+    if probe_config.probe_design == "target_only" and certification_metric != "target_failure":
+        raise ValueError(
+            "target_only probe design requires certification_metric: target_failure"
+        )
     controls_role = (
-        "diagnostic_only_for_verification"
+        "not_generated_target_only"
+        if probe_config.probe_design == "target_only"
+        else "diagnostic_only_for_verification"
         if certification_metric == "target_failure"
         else "certification_gate"
     )
@@ -675,18 +721,20 @@ def main() -> None:
             "attempted_probe_sets": int(
                 generation_log.get("attempted_probe_sets", probe_config.n_probe_sets)
             ),
-            "generated_probe_sets": len(generated) // 3,
+            "generated_probe_sets": len(generated) // probe_config.probes_per_set,
+            "probe_design": probe_config.probe_design,
+            "probes_per_set": probe_config.probes_per_set,
             "failed_generation_probe_sets": int(
                 generation_log.get("failed_generation_probe_sets", 0)
             ),
-            "valid_probe_sets": len(accepted) // 3,
+            "valid_probe_sets": len(accepted) // probe_config.probes_per_set,
             "rejected_probe_sets": len({row["probe_set_id"] for row in rejected}),
             "failed_validation_probe_sets": int(
                 validation_log.get("failed_validation_probe_sets", 0)
             ),
             "minimum_valid_probe_sets": probe_config.min_valid_probe_sets,
             "near_duplicate_threshold": probe_config.near_duplicate_threshold,
-            "reliable_for_lcb": len(accepted) // 3
+            "reliable_for_lcb": len(accepted) // probe_config.probes_per_set
             >= probe_config.min_valid_probe_sets,
         }
 
@@ -730,19 +778,23 @@ def main() -> None:
             K=K,
             T=T,
         )
-        strict_statistic = _verification_statistic(
-            hypothesis.id,
-            outcomes,
-            "strict_joint",
-            delta=delta,
-            tau_v=tau_v,
-            K=K,
-            T=T,
+        strict_statistic = (
+            None
+            if probe_config.probe_design == "target_only"
+            else _verification_statistic(
+                hypothesis.id,
+                outcomes,
+                "strict_joint",
+                delta=delta,
+                tau_v=tau_v,
+                K=K,
+                T=T,
+            )
         )
         result = dict(
             target_statistic
             if certification_metric == "target_failure"
-            else strict_statistic
+            else strict_statistic or {}
         )
         if not design_metadata[hypothesis.id]["reliable_for_lcb"]:
             result["certified"] = False
@@ -757,8 +809,12 @@ def main() -> None:
             "target_failure": _diagnostic_statistic(
                 target_statistic, "target_failure"
             ),
-            "strict_joint": _diagnostic_statistic(
-                strict_statistic, "strict_joint"
+            "strict_joint": (
+                _unavailable_diagnostic(
+                    "strict_joint", "controls_not_generated_in_target_only_design"
+                )
+                if strict_statistic is None
+                else _diagnostic_statistic(strict_statistic, "strict_joint")
             ),
             "controls": {
                 "role": controls_role,
@@ -772,7 +828,7 @@ def main() -> None:
         }
         # Retain the old field for readers of historical artifacts. New code
         # should use certification_outcome_definition and diagnostics.
-        result["z_definition"] = METRIC_DEFINITIONS["strict_joint"]
+        result["z_definition"] = METRIC_DEFINITIONS[certification_metric]
         results.append(result)
 
     write_jsonl(
@@ -788,10 +844,14 @@ def main() -> None:
             "oracle_debug": False,
             "verification_mode": "new_controlled_generated_probes",
             "verification_protocol_version": (
-                "target_failure_verified_v1"
+                "target_failure_target_only_verified_v1"
+                if probe_config.probe_design == "target_only"
+                else "target_failure_verified_v1"
                 if certification_metric == "target_failure"
                 else "strict_joint_verified_v1"
             ),
+            "probe_design": probe_config.probe_design,
+            "probes_per_set": probe_config.probes_per_set,
             "certification_metric": certification_metric,
             "controls_role": controls_role,
             "split_version": HANS_FIVE_WAY_SPLIT_VERSION,

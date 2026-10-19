@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.baselines import RandomBaseline, UncertaintyBaseline
 from src.benchmark.hans_manifest import FrozenHansManifest, audit_final_test_overlap
 from src.benchmark.selection import (
+    select_confidence_safe_entropy_novelty_pairs,
     select_complete_pairs,
     select_stratified_utility_pairs,
     select_verification_conditioned_primal_dual_pairs,
@@ -153,8 +154,9 @@ def _verification_sampling_evidence(
     selection_config: dict[str, Any],
     *,
     seed: int,
+    include_retained: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Join certified verification statistics to target failure labels."""
+    """Join retained verification statistics to target failure labels."""
     if not isinstance(provenance, dict):
         raise ValueError("Verification-conditioned sampling requires provenance")
     summary = provenance.get("verification_summary")
@@ -189,10 +191,19 @@ def _verification_sampling_evidence(
         outcomes_by_hypothesis.setdefault(hypothesis_id, []).append(outcome)
 
     evidence: dict[str, dict[str, Any]] = {}
+    states_value = provenance.get("hypothesis_verification_states", {})
+    retained_value = provenance.get("retained_hypothesis_ids", [])
+    states = states_value if isinstance(states_value, dict) else {}
+    retained = set(retained_value) if isinstance(retained_value, list) else set()
     for result in summary["results"]:
-        if not isinstance(result, dict) or result.get("certified") is not True:
+        if not isinstance(result, dict):
             continue
         hypothesis_id = str(result.get("hypothesis_id", ""))
+        if include_retained:
+            if hypothesis_id not in retained:
+                continue
+        elif result.get("certified") is not True:
+            continue
         diagnostics = result.get("diagnostics")
         controls = diagnostics.get("controls") if isinstance(diagnostics, dict) else None
         if not hypothesis_id or not isinstance(controls, dict):
@@ -218,6 +229,11 @@ def _verification_sampling_evidence(
             elif outcome.get("target_failure_observed") is not False:
                 raise ValueError("target_failure_observed must be boolean")
         evidence[hypothesis_id] = {
+            "state": str(
+                states.get(hypothesis_id, {}).get(
+                    "state", "certified" if result.get("certified") is True else ""
+                )
+            ),
             "lower_bound": float(result["lower_bound"]),
             "target_n": declared_n,
             "target_counts_by_label": target_counts,
@@ -226,7 +242,7 @@ def _verification_sampling_evidence(
             "invariant_accuracy": float(invariant["accuracy"]),
         }
     if not evidence:
-        raise ValueError("Verification-conditioned sampling found no certified hypothesis")
+        raise ValueError("Verification-conditioned sampling found no retained hypothesis")
     return evidence
 
 
@@ -606,13 +622,20 @@ def main() -> None:
         and ours_selection_strategy
         == "verification_conditioned_primal_dual_v1"
     )
+    use_confidence_safe_selection = (
+        args.method == "ours_verified"
+        and ours_selection_strategy == "confidence_safe_entropy_novelty_v1"
+    )
+    use_planned_utility_selection = (
+        use_v3_utility_selection or use_confidence_safe_selection
+    )
     adaptive_stopping_value = benchmark.get("ours_adaptive_stopping", {})
     if not isinstance(adaptive_stopping_value, dict):
         raise ValueError("stage2_benchmark.ours_adaptive_stopping must be a mapping")
     use_adaptive_stopping = bool(adaptive_stopping_value.get("enabled", False))
-    if use_adaptive_stopping and not use_v3_utility_selection:
+    if use_adaptive_stopping and not use_planned_utility_selection:
         raise ValueError(
-            "ours_adaptive_stopping is supported only by the v3 selection protocol"
+            "ours_adaptive_stopping requires a planned ours_verified selector"
         )
     stopping_partition_manifest: dict[str, Any] | None = None
     stopping_eval_rows = gain_eval_rows
@@ -684,11 +707,15 @@ def main() -> None:
     planned_selection_diagnostics: dict[str, Any] | None = None
     planned_acquisition_gpu_seconds = 0.0
     planned_acquisition_wall_seconds = 0.0
-    if use_v3_utility_selection:
+    if use_planned_utility_selection:
         assert student is not None
         acquisition_wall_start = time.perf_counter()
         acquisition_timer = _start_gpu_timer(student)
-        student.progress_label = "ours v3 synthetic utility scoring"
+        student.progress_label = (
+            "confidence-safe synthetic probability scoring"
+            if use_confidence_safe_selection
+            else "ours v3 synthetic utility scoring"
+        )
         probabilities = student.predict_proba(
             [item.premise for item in synthetic_pool],
             [item.hypothesis for item in synthetic_pool],
@@ -703,57 +730,113 @@ def main() -> None:
             )
             for index, item in enumerate(synthetic_pool)
         }
-        planned_synthetic, planned_selection_diagnostics = (
-            select_verification_conditioned_primal_dual_pairs(
-                synthetic_pool,
-                budget=args.budget,
-                seed=args.seed,
-                utility_scores=utility_scores,
-                verification_evidence=_verification_sampling_evidence(
-                    provenance, ours_selection_value, seed=args.seed
-                ),
-                label_temperature=float(
-                    ours_selection_value.get("label_temperature", 1.0)
-                ),
-                hypothesis_temperature=float(
-                    ours_selection_value.get("hypothesis_temperature", 0.25)
-                ),
-                utility_quantile_low=float(
-                    ours_selection_value.get("utility_quantile_low", 0.10)
-                ),
-                utility_quantile_high=float(
-                    ours_selection_value.get("utility_quantile_high", 0.90)
-                ),
-                utility_weight=float(ours_selection_value.get("utility_weight", 1.0)),
-                diversity_weight=float(
-                    ours_selection_value.get("diversity_weight", 0.35)
-                ),
-                specificity_weight=float(
-                    ours_selection_value.get("specificity_weight", 0.50)
-                ),
-                label_dual_weight=float(
-                    ours_selection_value.get("label_dual_weight", 1.25)
-                ),
-                hypothesis_dual_weight=float(
-                    ours_selection_value.get("hypothesis_dual_weight", 0.75)
-                ),
-                pair_type_dual_weight=float(
-                    ours_selection_value.get("pair_type_dual_weight", 0.50)
-                ),
-                dual_step=float(ours_selection_value.get("dual_step", 0.50)),
-                dual_clip=float(ours_selection_value.get("dual_clip", 3.0)),
-                sampling_temperature=float(
-                    ours_selection_value.get("sampling_temperature", 0.20)
+        if use_confidence_safe_selection:
+            entropy_scores = {
+                item.id: -sum(
+                    float(probability) * math.log(max(float(probability), 1e-12))
+                    for probability in probabilities[index]
+                )
+                / math.log(len(MNLI_LABELS))
+                for index, item in enumerate(synthetic_pool)
+            }
+            student.progress_label = "confidence-safe synthetic embedding extraction"
+            embedding_rows = student.encode_pair_embeddings(
+                [item.premise for item in synthetic_pool],
+                [item.hypothesis for item in synthetic_pool],
+                batch_size=int(
+                    ours_selection_value.get("embedding_batch_size", batch_size)
                 ),
             )
-        )
+            if len(embedding_rows) != len(synthetic_pool):
+                raise RuntimeError(
+                    "Student embedding count does not match synthetic pool"
+                )
+            planned_synthetic, planned_selection_diagnostics = (
+                select_confidence_safe_entropy_novelty_pairs(
+                    synthetic_pool,
+                    budget=args.budget,
+                    seed=args.seed,
+                    nll_scores=utility_scores,
+                    entropy_scores=entropy_scores,
+                    embeddings={
+                        item.id: embedding_rows[index]
+                        for index, item in enumerate(synthetic_pool)
+                    },
+                    verification_evidence=_verification_sampling_evidence(
+                        provenance,
+                        ours_selection_value,
+                        seed=args.seed,
+                        include_retained=True,
+                    ),
+                    nll_weight=float(ours_selection_value.get("nll_weight", 0.65)),
+                    entropy_weight=float(
+                        ours_selection_value.get("entropy_weight", 0.35)
+                    ),
+                    novelty_weight=float(
+                        ours_selection_value.get("novelty_weight", 0.50)
+                    ),
+                    nll_quantile_low=float(
+                        ours_selection_value.get("nll_quantile_low", 0.10)
+                    ),
+                    nll_quantile_high=float(
+                        ours_selection_value.get("nll_quantile_high", 0.90)
+                    ),
+                )
+            )
+        else:
+            planned_synthetic, planned_selection_diagnostics = (
+                select_verification_conditioned_primal_dual_pairs(
+                    synthetic_pool,
+                    budget=args.budget,
+                    seed=args.seed,
+                    utility_scores=utility_scores,
+                    verification_evidence=_verification_sampling_evidence(
+                        provenance, ours_selection_value, seed=args.seed
+                    ),
+                    label_temperature=float(
+                        ours_selection_value.get("label_temperature", 1.0)
+                    ),
+                    hypothesis_temperature=float(
+                        ours_selection_value.get("hypothesis_temperature", 0.25)
+                    ),
+                    utility_quantile_low=float(
+                        ours_selection_value.get("utility_quantile_low", 0.10)
+                    ),
+                    utility_quantile_high=float(
+                        ours_selection_value.get("utility_quantile_high", 0.90)
+                    ),
+                    utility_weight=float(
+                        ours_selection_value.get("utility_weight", 1.0)
+                    ),
+                    diversity_weight=float(
+                        ours_selection_value.get("diversity_weight", 0.35)
+                    ),
+                    specificity_weight=float(
+                        ours_selection_value.get("specificity_weight", 0.50)
+                    ),
+                    label_dual_weight=float(
+                        ours_selection_value.get("label_dual_weight", 1.25)
+                    ),
+                    hypothesis_dual_weight=float(
+                        ours_selection_value.get("hypothesis_dual_weight", 0.75)
+                    ),
+                    pair_type_dual_weight=float(
+                        ours_selection_value.get("pair_type_dual_weight", 0.50)
+                    ),
+                    dual_step=float(ours_selection_value.get("dual_step", 0.50)),
+                    dual_clip=float(ours_selection_value.get("dual_clip", 3.0)),
+                    sampling_temperature=float(
+                        ours_selection_value.get("sampling_temperature", 0.20)
+                    ),
+                )
+            )
         planned_acquisition_gpu_seconds = float(
             _stop_gpu_timer(student, acquisition_timer) or 0.0
         )
         planned_acquisition_wall_seconds = time.perf_counter() - acquisition_wall_start
         if planned_selection_diagnostics.get("shortage") and not verified_abstention:
             raise ValueError(
-                "Synthetic pool cannot satisfy the v3 complete-pair budget: "
+                "Synthetic pool cannot satisfy the planned complete-pair budget: "
                 f"requested={args.budget}, actual={len(planned_synthetic)}"
             )
 
@@ -811,7 +894,7 @@ def main() -> None:
             )
             acquired_synthetic = []
         else:
-            if use_v3_utility_selection:
+            if use_planned_utility_selection:
                 offset = len(selected_ids)
                 acquired_synthetic = planned_synthetic[offset : offset + requested]
                 stage_label_counts = {
@@ -897,7 +980,7 @@ def main() -> None:
             _stop_gpu_timer(student, acquisition_timer) or 0.0
         )
         acquisition_wall_seconds = time.perf_counter() - acquisition_wall_start
-        if use_v3_utility_selection and round_index == 1:
+        if use_planned_utility_selection and round_index == 1:
             acquisition_gpu_seconds = planned_acquisition_gpu_seconds
             acquisition_wall_seconds = planned_acquisition_wall_seconds
         actual = len(acquired_mnli)

@@ -832,6 +832,54 @@ def main() -> None:
                 )
             )
 
+    confidence_safe_results = [
+        result
+        for result in results
+        if result.get("ours_selection_strategy")
+        == "confidence_safe_entropy_novelty_v1"
+        and isinstance(result.get("ours_selection_diagnostics"), dict)
+    ]
+    if confidence_safe_results:
+        lines.extend(
+            [
+                "",
+                "## Confidence-safe entropy-novelty sampling",
+                "",
+                "Only hypotheses whose Hoeffding UCB is below the threshold are "
+                "excluded. Certified and unresolved hypotheses are retained; one "
+                "coverage pair per retained hypothesis is selected before greedy "
+                "target NLL, entropy, and contextual-embedding novelty scoring.",
+                "",
+                "| Seed | States | Selected hypothesis pairs | Target NLL | Target entropy | Embedding novelty |",
+                "|---:|---|---|---:|---:|---:|",
+            ]
+        )
+        for result in sorted(
+            confidence_safe_results, key=lambda item: int(item["seed"])
+        ):
+            diagnostics = result["ours_selection_diagnostics"]
+            states = diagnostics.get("retained_hypothesis_states", {})
+            hypothesis_counts = diagnostics.get("hypothesis_pair_counts", {})
+            lines.append(
+                "| {seed} | {states} | {hypotheses} | {nll:.4f} | {entropy:.4f} | {novelty:.4f} |".format(
+                    seed=result["seed"],
+                    states=", ".join(
+                        f"{key}:{value}" for key, value in sorted(states.items())
+                    ),
+                    hypotheses=", ".join(
+                        f"{key}:{value}"
+                        for key, value in sorted(hypothesis_counts.items())
+                    ),
+                    nll=float(diagnostics.get("mean_selected_target_nll", 0.0)),
+                    entropy=float(
+                        diagnostics.get("mean_selected_target_entropy", 0.0)
+                    ),
+                    novelty=float(
+                        diagnostics.get("mean_selected_embedding_novelty", 0.0)
+                    ),
+                )
+            )
+
     lines.extend(
         [
             "",

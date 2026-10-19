@@ -1,0 +1,15 @@
+extends: stage2_generation_ours.yaml
+
+# A hypothesis is removed only when its simultaneous Hoeffding UCB is below
+# tau_v. Certified and unresolved hypotheses both remain eligible.
+verification_retention_policy: confidence_safe
+
+# Use a larger one-shot reserve because this experiment prioritizes downstream
+# quality and mechanism coverage before studying generation cost.
+synthetic_generation:
+  counterfactual_pairs_per_hypothesis: 120
+  invariant_pairs_per_hypothesis: 120
+
+stage2_generation_limit_examples: 480
+stage2_min_accepted_examples: 128
+stage2_max_generated_examples: 1600

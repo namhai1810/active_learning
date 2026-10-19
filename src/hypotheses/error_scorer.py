@@ -56,6 +56,40 @@ class ErrorProbabilityScorer(Protocol):
     def score(self, records: Sequence[Mapping[str, Any]]) -> ErrorScoreBatch: ...
 
 
+class UniformGoldBlindErrorProbabilityScorer:
+    """Assign an uninformative score without invoking a teacher critic.
+
+    The hypothesis generator still separates observed discovery errors from
+    correct contrasts using the experiment's labels.  This scorer only controls
+    which records are shown to the hypothesis-proposal call and deliberately
+    ignores every field except the permitted gold-blind scorer view.  It is
+    useful in closed-loop rounds where re-running a critic over the entire
+    discovery partition would dominate the experimental cost.
+    """
+
+    method = "uniform_gold_blind"
+
+    def __init__(self, *, score: float = 0.5, source: str = "uniform_gold_blind") -> None:
+        if not math.isfinite(score) or not 0.0 <= score <= 1.0:
+            raise ValueError("Uniform error score must be finite and in [0, 1]")
+        if not source.strip():
+            raise ValueError("Uniform error-score source must be non-empty")
+        self.value = float(score)
+        self.source = source
+
+    def score(self, records: Sequence[Mapping[str, Any]]) -> ErrorScoreBatch:
+        sanitized = [_scorer_record(record) for record in records]
+        ids = [str(record["id"]) for record in sanitized]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Error scoring requires unique example IDs")
+        return ErrorScoreBatch(
+            scores={example_id: self.value for example_id in ids},
+            method=self.method,
+            source=self.source,
+            logs=(),
+        )
+
+
 def _scorer_record(record: Mapping[str, Any]) -> dict[str, Any]:
     required = ("id", "premise", "hypothesis", "prediction")
     missing = [field for field in required if field not in record]

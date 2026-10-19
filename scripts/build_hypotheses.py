@@ -19,7 +19,11 @@ from src.data.pipeline_split import (
     reconstruct_five_way_split,
 )
 from src.hypotheses.llm_generator import LLMDiscoveryConfig, LLMFailureHypothesisGenerator
-from src.hypotheses.error_scorer import ErrorScoringConfig, TeacherErrorProbabilityScorer
+from src.hypotheses.error_scorer import (
+    ErrorScoringConfig,
+    TeacherErrorProbabilityScorer,
+    UniformGoldBlindErrorProbabilityScorer,
+)
 from src.teacher import PersistentJSONTeacherCache, build_teacher
 from src.utils.artifacts import read_jsonl
 from src.utils.config import load_yaml_with_extends, require_mapping
@@ -94,26 +98,36 @@ def main() -> None:
         run_dir / "teacher_calls" / "response_cache",
     )
     scorer_config_value = require_mapping(generation, "error_scorer")
-    if scorer_config_value.get("type", "teacher_llm") != "teacher_llm":
-        raise ValueError("Only the explicit teacher_llm discovery error scorer is supported")
-    scorer = TeacherErrorProbabilityScorer(
-        teacher,
-        ErrorScoringConfig(
-            max_records_per_call=int(
-                scorer_config_value.get("max_records_per_call", 40)
+    scorer_type = str(scorer_config_value.get("type", "teacher_llm"))
+    if scorer_type == "teacher_llm":
+        scorer = TeacherErrorProbabilityScorer(
+            teacher,
+            ErrorScoringConfig(
+                max_records_per_call=int(
+                    scorer_config_value.get("max_records_per_call", 40)
+                ),
+                max_attempts_per_batch=int(
+                    scorer_config_value.get("max_attempts_per_batch", 3)
+                ),
+                seed=int(scorer_config_value.get("seed", discovery_config.seed)),
+                prompt_version=str(
+                    scorer_config_value.get(
+                        "prompt_version", "discovery_error_probability_v1"
+                    )
+                ),
+                source=str(scorer_config_value.get("source", "teacher_llm_critic")),
             ),
-            max_attempts_per_batch=int(
-                scorer_config_value.get("max_attempts_per_batch", 3)
-            ),
-            seed=int(scorer_config_value.get("seed", discovery_config.seed)),
-            prompt_version=str(
-                scorer_config_value.get(
-                    "prompt_version", "discovery_error_probability_v1"
-                )
-            ),
-            source=str(scorer_config_value.get("source", "teacher_llm_critic")),
-        ),
-    )
+        )
+    elif scorer_type == "uniform_gold_blind":
+        scorer = UniformGoldBlindErrorProbabilityScorer(
+            score=float(scorer_config_value.get("score", 0.5)),
+            source=str(scorer_config_value.get("source", "uniform_gold_blind")),
+        )
+    else:
+        raise ValueError(
+            "Unsupported discovery error scorer. Expected teacher_llm or "
+            f"uniform_gold_blind, got {scorer_type!r}"
+        )
     generator = LLMFailureHypothesisGenerator(teacher, discovery_config, scorer)
     hypotheses, evidence, call_log = generator.generate(discovery)
 

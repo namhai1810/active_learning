@@ -12,10 +12,17 @@ from src.benchmark.hans_manifest import (
     validate_frozen_hans_manifest,
 )
 from src.benchmark.selection import (
+    select_closed_loop_soft_pairs,
+    select_confidence_safe_entropy_novelty_pairs,
     select_complete_pairs,
     select_stratified_utility_pairs,
     select_verification_conditioned_primal_dual_pairs,
 )
+from src.active_learning.closed_loop import (
+    merge_hypothesis_candidates,
+    verification_states,
+)
+from src.hypotheses.error_scorer import UniformGoldBlindErrorProbabilityScorer
 from src.benchmark.stopping_subset import (
     build_stopping_subset_manifest,
     validate_stopping_subset_manifest,
@@ -30,6 +37,13 @@ from scripts.run_stage2_benchmark import (
     _paired_gain_confidence,
     _synthetic_pool,
 )
+from scripts.run_stage2_closed_loop import (
+    _skipped_discovery_payload,
+    _write_round_split_manifest,
+)
+from scripts.verify_hypotheses import _load_hypotheses as _load_verified_hypotheses
+from scripts.generate_synthetic_interventions import _retained_ids
+from src.data.pipeline_split import reconstruct_five_way_split, validate_manifest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +61,33 @@ def _hans_rows(n=40):
         }
         for index in range(n)
     ]
+
+
+def test_closed_loop_writes_online_manifest_when_discovery_is_skipped(tmp_path):
+    rows = [{"id": row["id"]} for row in _hans_rows()]
+    hans = {
+        "discovery_fraction": 0.2,
+        "verification_fraction": 0.2,
+        "intervention_fraction": 0.2,
+        "gain_eval_fraction": 0.2,
+        "split_seed": 42,
+    }
+    path = tmp_path / "hans_split_v2.json"
+
+    _write_round_split_manifest(path, rows, hans)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["split_version"] == "hans_five_way_v1"
+    validate_manifest(payload, reconstruct_five_way_split(rows, hans))
+
+
+def test_closed_loop_skipped_discovery_preserves_hypothesis_provenance():
+    payload = _skipped_discovery_payload(
+        "skipped_active_candidate_capacity_full"
+    )
+
+    assert payload["split_role"] == "hypothesis_discovery"
+    assert _load_verified_hypotheses(payload) == []
 
 
 def _synthetic(pair_index, member):
@@ -91,6 +132,187 @@ def _stratified_synthetic(pair_index, hypothesis_id, pair_type, labels):
         )
         for offset, member in enumerate(members)
     ]
+
+
+def test_uniform_gold_blind_error_scorer_ignores_gold_and_correctness():
+    records = [
+        {
+            "id": "a",
+            "premise": "A premise.",
+            "hypothesis": "A hypothesis.",
+            "prediction": "entailment",
+            "gold": "contradiction",
+            "correct": False,
+        },
+        {
+            "id": "b",
+            "premise": "Another premise.",
+            "hypothesis": "Another hypothesis.",
+            "prediction": "neutral",
+            "gold": "neutral",
+            "correct": True,
+        },
+    ]
+    result = UniformGoldBlindErrorProbabilityScorer(score=0.5).score(records)
+    assert result.scores == {"a": 0.5, "b": 0.5}
+    assert result.logs == ()
+    assert result.method == "uniform_gold_blind"
+
+
+def test_closed_loop_hypothesis_merge_preserves_active_and_deduplicates_history():
+    archive = [
+        {
+            "id": "old",
+            "name": "Subject object reversal",
+            "description": "The model swaps the subject and object roles.",
+            "predicted_failure_behavior": "Predicts entailment after reversal.",
+            "intervention_target": "Reversed agent and patient pairs.",
+        }
+    ]
+    proposals = [
+        {
+            "id": "renamed",
+            "name": "Subject object reversal",
+            "description": "The model swaps the subject and object roles.",
+            "predicted_failure_behavior": "Predicts entailment after reversal.",
+            "intervention_target": "Reversed agent and patient pairs.",
+        },
+        {
+            "id": "novel",
+            "name": "Negated conditional",
+            "description": "Conditional negation causes a systematic failure.",
+            "predicted_failure_behavior": "Predicts entailment for a negated condition.",
+            "intervention_target": "Negated conditional clauses.",
+        },
+    ]
+    merged, log = merge_hypothesis_candidates(
+        archive,
+        proposals,
+        active_ids=["old"],
+        maximum=3,
+        near_duplicate_threshold=0.78,
+    )
+    assert [item["id"] for item in merged] == ["old", "novel"]
+    assert log["novel_accepted"] == ["novel"]
+    assert log["proposals_rejected"][0]["duplicate_of"] == "old"
+
+
+def test_closed_loop_rediscovery_reactivates_a_resolved_mechanism():
+    archived = {
+        "id": "resolved",
+        "name": "Negated conditional",
+        "description": "Conditional negation causes a systematic failure.",
+        "predicted_failure_behavior": "Predicts entailment for a negated condition.",
+        "intervention_target": "Negated conditional clauses.",
+    }
+    renamed = {**archived, "id": "renamed"}
+    merged, log = merge_hypothesis_candidates(
+        [archived],
+        [renamed],
+        active_ids=[],
+        maximum=3,
+        near_duplicate_threshold=0.78,
+    )
+    assert [item["id"] for item in merged] == ["resolved"]
+    assert log["historical_reactivated"] == ["resolved"]
+    assert log["proposals_rejected"][0]["reason"] == "historical_mechanism_reactivated"
+
+
+def test_checkpoint_verification_state_uses_ucb_to_resolve():
+    payload = {
+        "tau_v": 0.5,
+        "results": [
+            {
+                "hypothesis_id": "resolved",
+                "nu_hat": 0.0,
+                "confidence_radius": 0.4,
+                "lower_bound": -0.4,
+                "n": 20,
+                "certification_metric": "target_failure",
+                "probe_design": {"reliable_for_lcb": True},
+            },
+            {
+                "hypothesis_id": "uncertain",
+                "nu_hat": 0.5,
+                "confidence_radius": 0.4,
+                "lower_bound": 0.1,
+                "n": 20,
+                "certification_metric": "target_failure",
+                "probe_design": {"reliable_for_lcb": True},
+            },
+        ],
+    }
+    states = verification_states(payload)
+    assert states["resolved"]["state"] == "refuted"
+    assert states["uncertain"]["state"] == "unresolved"
+
+
+def test_closed_loop_soft_selector_is_pair_complete_and_deterministic():
+    pool = []
+    for pair_index, hypothesis_id in enumerate(("h1", "h1", "h2", "h2")):
+        pool.extend(
+            _stratified_synthetic(
+                pair_index,
+                hypothesis_id,
+                "invariant",
+                ("entailment", "entailment"),
+            )
+        )
+    nll = {item.id: float(index + 1) for index, item in enumerate(pool)}
+    entropy = {item.id: (index % 4) / 4 for index, item in enumerate(pool)}
+    embeddings = {
+        item.id: [1.0, float(pair_index + 1), float(pair_index % 2)]
+        for pair_index, item in enumerate(pool)
+    }
+    kwargs = {
+        "budget": 4,
+        "seed": 42,
+        "nll_scores": nll,
+        "entropy_scores": entropy,
+        "embeddings": embeddings,
+        "verification_evidence": {
+            "h1": {"state": "certified"},
+            "h2": {"state": "unresolved"},
+        },
+        "prior_hypothesis_pair_counts": {"h1": 5, "h2": 0},
+    }
+    selected, diagnostics = select_closed_loop_soft_pairs(pool, **kwargs)
+    repeated, repeated_diagnostics = select_closed_loop_soft_pairs(pool, **kwargs)
+    assert [item.id for item in selected] == [item.id for item in repeated]
+    assert diagnostics == repeated_diagnostics
+    assert len(selected) == 4
+    assert len({item.pair_id for item in selected}) == 2
+    assert diagnostics["hard_hypothesis_quota"] is False
+    assert diagnostics["weights"]["new_hypothesis_bonus"] == 0.50
+    first_pair = next(iter(diagnostics["selected_pair_components"].values()))
+    assert 0.0 < first_pair["new_hypothesis_bonus"] <= 1.0
+
+
+def test_closed_loop_soft_bonus_prefers_an_untrained_hypothesis_when_tied():
+    pool = [
+        *_stratified_synthetic(
+            20, "trained", "invariant", ("entailment", "entailment")
+        ),
+        *_stratified_synthetic(
+            21, "new", "invariant", ("entailment", "entailment")
+        ),
+    ]
+    selected, diagnostics = select_closed_loop_soft_pairs(
+        pool,
+        budget=2,
+        seed=42,
+        nll_scores={item.id: 1.0 for item in pool},
+        entropy_scores={item.id: 0.5 for item in pool},
+        embeddings={item.id: [1.0, 0.0] for item in pool},
+        verification_evidence={
+            "trained": {"state": "certified"},
+            "new": {"state": "unresolved"},
+        },
+        prior_hypothesis_pair_counts={"trained": 5, "new": 0},
+    )
+    assert {item.hypothesis_id for item in selected} == {"new"}
+    component = next(iter(diagnostics["selected_pair_components"].values()))
+    assert component["new_hypothesis_bonus"] == 1.0
 
 
 def test_frozen_manifest_roundtrip_is_seed_independent_for_experiments():
@@ -253,6 +475,94 @@ def test_verification_conditioned_selection_learns_targets_and_is_reproducible()
         sum(item.pair_id == pair_id for item in selected) == 2
         for pair_id in {item.pair_id for item in selected}
     )
+
+
+def test_confidence_safe_retention_keeps_unresolved_and_rejects_only_by_ucb():
+    def result(hypothesis_id, estimate, radius, certified=False):
+        return {
+            "hypothesis_id": hypothesis_id,
+            "certified": certified,
+            "diagnostics": {
+                "target_failure": {
+                    "nu_hat": estimate,
+                    "confidence_radius": radius,
+                    "lower_bound": estimate - radius,
+                }
+            },
+        }
+
+    payload = {
+        "mode": "llm_main",
+        "oracle_debug": False,
+        "verification_mode": "new_controlled_generated_probes",
+        "verification_probes_training_eligible": False,
+        "certification_metric": "target_failure",
+        "tau_v": 0.5,
+        "results": [
+            result("certified", 0.90, 0.30, certified=True),
+            result("unresolved", 0.55, 0.25),
+            result("refuted", 0.00, 0.44),
+        ],
+    }
+    certified, retained, states = _retained_ids(
+        payload, retention_policy="confidence_safe"
+    )
+    assert certified == ["certified"]
+    assert retained == ["certified", "unresolved"]
+    assert states["refuted"]["state"] == "refuted"
+
+
+def test_confidence_safe_entropy_novelty_selection_covers_every_retained_hypothesis():
+    pool = []
+    pair_specs = [
+        (0, "certified", "counterfactual", ("neutral", "entailment")),
+        (1, "certified", "invariant", ("contradiction", "contradiction")),
+        (2, "unresolved", "counterfactual", ("neutral", "contradiction")),
+        (3, "unresolved", "invariant", ("entailment", "entailment")),
+    ]
+    for spec in pair_specs:
+        pool.extend(_stratified_synthetic(*spec))
+    nll_scores = {item.id: 0.2 + index / 10 for index, item in enumerate(pool)}
+    entropy_scores = {item.id: 0.2 + (index % 4) / 10 for index, item in enumerate(pool)}
+    embeddings = {
+        item.id: [
+            1.0 if index % 2 == 0 else 0.0,
+            1.0 if item.hypothesis_id == "unresolved" else 0.2,
+            0.1 + index / 100,
+        ]
+        for index, item in enumerate(pool)
+    }
+    evidence = {
+        "certified": {"state": "certified"},
+        "unresolved": {"state": "unresolved"},
+    }
+
+    selected, diagnostics = select_confidence_safe_entropy_novelty_pairs(
+        pool,
+        budget=6,
+        seed=42,
+        nll_scores=nll_scores,
+        entropy_scores=entropy_scores,
+        embeddings=embeddings,
+        verification_evidence=evidence,
+    )
+    repeated, repeated_diagnostics = select_confidence_safe_entropy_novelty_pairs(
+        pool,
+        budget=6,
+        seed=42,
+        nll_scores=nll_scores,
+        entropy_scores=entropy_scores,
+        embeddings=embeddings,
+        verification_evidence=evidence,
+    )
+
+    assert [item.id for item in selected] == [item.id for item in repeated]
+    assert diagnostics == repeated_diagnostics
+    assert diagnostics["selection_strategy"] == "confidence_safe_entropy_novelty_v1"
+    assert set(diagnostics["hypothesis_pair_counts"]) == {"certified", "unresolved"}
+    assert all(value >= 1 for value in diagnostics["hypothesis_pair_counts"].values())
+    assert len(selected) == 6
+    assert len({item.pair_id for item in selected}) == 3
 
 
 def test_paired_gain_stopping_requires_patience_and_records_cost_efficiency():

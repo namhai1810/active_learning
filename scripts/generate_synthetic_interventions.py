@@ -71,7 +71,8 @@ def _load_candidates(payload: dict[str, Any]) -> dict[str, FailureHypothesis]:
     return candidates
 
 
-def _certified_ids(payload: dict[str, Any]) -> list[str]:
+def _verification_states(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Classify hypotheses without treating an unresolved interval as rejection."""
     if payload.get("mode") != "llm_main" or payload.get("oracle_debug") is not False:
         raise ValueError("Expected main-method verification results")
     if (
@@ -82,14 +83,70 @@ def _certified_ids(payload: dict[str, Any]) -> list[str]:
     raw = payload.get("results")
     if not isinstance(raw, list):
         raise ValueError("Verification results must be a list")
-    result = [
-        str(item["hypothesis_id"])
-        for item in raw
-        if isinstance(item, dict) and item.get("certified") is True
+    metric = str(payload.get("certification_metric", "strict_joint"))
+    threshold = float(payload.get("tau_v", 0.5))
+    states: dict[str, dict[str, Any]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("Every verification result must be an object")
+        hypothesis_id = str(item.get("hypothesis_id", ""))
+        if not hypothesis_id or hypothesis_id in states:
+            raise ValueError("Verification hypothesis IDs must be non-empty and unique")
+        diagnostics = item.get("diagnostics")
+        diagnostic = diagnostics.get(metric) if isinstance(diagnostics, dict) else None
+        if not isinstance(diagnostic, dict):
+            if item.get("certified") is True:
+                state = "certified"
+                lower_bound = float(item.get("lower_bound", threshold))
+                upper_bound = float(item.get("upper_bound", 1.0))
+            else:
+                state = "invalid"
+                lower_bound = None
+                upper_bound = None
+        else:
+            estimate = float(diagnostic["nu_hat"])
+            radius = float(diagnostic["confidence_radius"])
+            lower_bound = float(diagnostic["lower_bound"])
+            upper_bound = min(1.0, estimate + radius)
+            if item.get("certified") is True:
+                state = "certified"
+            elif upper_bound < threshold:
+                state = "refuted"
+            else:
+                state = "unresolved"
+        states[hypothesis_id] = {
+            "state": state,
+            "certified": item.get("certified") is True,
+            "lower_bound": lower_bound,
+            "upper_bound": upper_bound,
+            "threshold": threshold,
+            "metric": metric,
+        }
+    return states
+
+
+def _retained_ids(
+    payload: dict[str, Any], *, retention_policy: str
+) -> tuple[list[str], list[str], dict[str, dict[str, Any]]]:
+    states = _verification_states(payload)
+    certified = [
+        hypothesis_id
+        for hypothesis_id, value in states.items()
+        if value["state"] == "certified"
     ]
-    if len(result) != len(set(result)):
-        raise ValueError("Duplicate certified hypothesis IDs")
-    return result
+    if retention_policy == "certified_only":
+        retained = certified
+    elif retention_policy == "confidence_safe":
+        retained = [
+            hypothesis_id
+            for hypothesis_id, value in states.items()
+            if value["state"] in {"certified", "unresolved"}
+        ]
+    else:
+        raise ValueError(
+            "verification_retention_policy must be certified_only or confidence_safe"
+        )
+    return certified, retained, states
 
 
 def _verification_summary(payload: dict[str, Any]) -> dict[str, Any]:
@@ -105,6 +162,8 @@ def _verification_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "certification_metric", "strict_joint"
         ),
         "controls_role": payload.get("controls_role", "certification_gate"),
+        "probe_design": payload.get("probe_design", "controlled_triplet"),
+        "probes_per_set": payload.get("probes_per_set", 3),
         "delta": payload.get("delta"),
         "tau_v": payload.get("tau_v"),
         "K": payload.get("K"),
@@ -124,6 +183,9 @@ def _synthetic_manifest(
     maximum_generated: int,
     teacher_config: dict[str, Any],
     certified: list[str],
+    retained: list[str],
+    retention_policy: str,
+    verification_states: dict[str, dict[str, Any]],
     generation_config: SyntheticGenerationConfig,
     validation_config: SyntheticValidationConfig,
     quality_prompt_version: str,
@@ -149,6 +211,9 @@ def _synthetic_manifest(
             "name_or_path": teacher_config.get("name_or_path"),
         },
         "certified_hypothesis_ids": certified,
+        "retained_hypothesis_ids": retained,
+        "verification_retention_policy": retention_policy,
+        "hypothesis_verification_states": verification_states,
         "generation_config": {
             "counterfactual_pairs_per_hypothesis": generation_config.counterfactual_pairs_per_hypothesis,
             "invariant_pairs_per_hypothesis": generation_config.invariant_pairs_per_hypothesis,
@@ -220,6 +285,9 @@ def main() -> None:
     teacher_config = require_mapping(config, "teacher")
     stage2_policy = str(
         config.get("stage2_policy", "failure_targeted_verified")
+    )
+    retention_policy = str(
+        config.get("verification_retention_policy", "certified_only")
     )
     allowed_policies = {
         "failure_targeted_verified",
@@ -330,6 +398,17 @@ def main() -> None:
         )
         hypotheses = {random_hypothesis.id: random_hypothesis}
         certified = [random_hypothesis.id]
+        retained = list(certified)
+        verification_states = {
+            random_hypothesis.id: {
+                "state": "not_applicable",
+                "certified": False,
+                "lower_bound": None,
+                "upper_bound": None,
+                "threshold": None,
+                "metric": None,
+            }
+        }
         verification_payload = None
         verification_summary = None
     else:
@@ -338,13 +417,27 @@ def main() -> None:
             verification_payload = read_json(required["verification"])
             if verification_payload.get("split_version") != HANS_FIVE_WAY_SPLIT_VERSION:
                 raise ValueError("Verification used an incompatible split manifest")
-            certified = _certified_ids(verification_payload)
+            certified, retained, verification_states = _retained_ids(
+                verification_payload, retention_policy=retention_policy
+            )
             verification_summary = _verification_summary(verification_payload)
         else:
             verification_payload = None
             verification_summary = None
             certified = list(hypotheses)
-        unknown = sorted(set(certified) - set(hypotheses))
+            retained = list(hypotheses)
+            verification_states = {
+                hypothesis_id: {
+                    "state": "verification_bypassed",
+                    "certified": False,
+                    "lower_bound": None,
+                    "upper_bound": None,
+                    "threshold": None,
+                    "metric": None,
+                }
+                for hypothesis_id in retained
+            }
+        unknown = sorted(set(retained) - set(hypotheses))
         if unknown:
             raise ValueError(f"Selected hypotheses are missing from candidates: {unknown}")
 
@@ -379,7 +472,7 @@ def main() -> None:
         raise ValueError(
             "stage2_min_accepted_examples cannot exceed the generation safety cap"
         )
-    if not certified and stage2_policy == "failure_targeted_verified":
+    if not retained and stage2_policy == "failure_targeted_verified":
         write_jsonl(output_dir / "generated.jsonl", [])
         write_jsonl(output_dir / "accepted.jsonl", [])
         write_jsonl(output_dir / "rejected.jsonl", [])
@@ -392,7 +485,10 @@ def main() -> None:
                 minimum_accepted=minimum_accepted,
                 maximum_generated=maximum_generated,
                 teacher_config=teacher_config,
-                certified=[],
+                certified=certified,
+                retained=[],
+                retention_policy=retention_policy,
+                verification_states=verification_states,
                 generation_config=generation_config,
                 validation_config=validation_config,
                 quality_prompt_version=quality_prompt_version,
@@ -410,8 +506,8 @@ def main() -> None:
             flush=True,
         )
         return
-    if minimum_accepted and not certified:
-        raise ValueError("No certified hypotheses are available for the required pool")
+    if minimum_accepted and not retained:
+        raise ValueError("No retained hypotheses are available for the required pool")
 
     # Do not construct or load the teacher until after the verified-policy
     # abstention above. A zero-certified run must make no synthetic teacher call.
@@ -466,8 +562,8 @@ def main() -> None:
     round_reasoning_pairs = generation_config.reasoning_contrast_pairs_per_hypothesis
     while True:
         round_start = len(generated_all)
-        hypothesis_count = len(certified)
-        for hypothesis_index, hypothesis_id in enumerate(certified):
+        hypothesis_count = len(retained)
+        for hypothesis_index, hypothesis_id in enumerate(retained):
             hypothesis = hypotheses[hypothesis_id]
 
             def allocated(total: int) -> int:
@@ -589,7 +685,7 @@ def main() -> None:
             round_counterfactual_pairs = planned_pairs - round_invariant_pairs
         round_reasoning_pairs = 0
         round_index += 1
-    for hypothesis_id in certified:
+    for hypothesis_id in retained:
         generated = [
             item for item in generated_all if item.hypothesis_id == hypothesis_id
         ]
@@ -625,6 +721,9 @@ def main() -> None:
             maximum_generated=maximum_generated,
             teacher_config=teacher_config,
             certified=certified,
+            retained=retained,
+            retention_policy=retention_policy,
+            verification_states=verification_states,
             generation_config=generation_config,
             validation_config=validation_config,
             quality_prompt_version=quality_prompt_version,

@@ -1,1332 +1,1196 @@
-# Failure-Driven Active Learning: flow, prompt và cơ sở toán học
+# Confidence-Safe Failure-Driven Synthetic Acquisition (Protocol v5)
 
-Tài liệu này mô tả **đúng hành vi của nhánh `llm_main` trong code hiện tại**. Nó
-được dùng như source-of-truth để chạy lại pipeline, kiểm tra implementation và
-viết Method/Algorithm/Experimental Setup/Limitations cho paper.
+## 0. Phạm vi và trạng thái tài liệu
 
-Nhánh `oracle_hans_*`, ablation và offline theory validation là debug/reference,
-không phải online main flow trừ khi được ghi rõ.
+Tài liệu này là mô tả kỹ thuật chuẩn của pipeline `ours_verified` v5 cho Stage 2. Mục tiêu là đủ chính xác để dùng làm cơ sở viết phần Method, Algorithm, Experimental Setup, Ablation và Limitations của paper, đồng thời đủ cụ thể để audit implementation.
 
----
+Tài liệu phân biệt rõ ba loại phát biểu:
 
-## 1. Tóm tắt phương pháp
+1. **Định nghĩa protocol**: hành vi được code và config quy định.
+2. **Bảo đảm có điều kiện**: mệnh đề thống kê chỉ đúng dưới các giả định được nêu.
+3. **Kết quả thực nghiệm**: số liệu quan sát được ở seed 42, không phải bảo đảm tổng quát.
 
-Pipeline bắt đầu bằng một frozen, seed-independent HANS manifest. Chỉ bốn role
-adaptive được đánh giá trước; final-test chỉ tồn tại dưới dạng ID placeholder
-trong artifact mà pipeline nhìn thấy. Teacher LLM quan sát các
-lỗi ở discovery split để đề xuất failure hypotheses có thể kiểm chứng. Mỗi
-hypothesis được kiểm chứng bằng controlled probes mới, được sinh và QC hoàn toàn
-trước khi nhìn thấy student outcome. Hypothesis chỉ được giữ nếu lower confidence
-bound của controlled failure rate vượt ngưỡng verification.
-
-Với mỗi hypothesis đã certified, teacher sinh các cặp NLI ba nhãn mới. Dữ liệu
-được QC theo cả pair, lọc duplicate/leakage, rồi đưa vào các fresh-checkpoint
-pilot interventions rời nhau. Gain pilot được đo bằng mức giảm HANS risk trên
-`gain_eval`. Cuối cùng code dùng optimistic gain trừ acquisition cost để quyết
-định STOP hay CONTINUE. CONTINUE chạy một fresh full LoRA intervention, checkpoint
-đó trở thành starting checkpoint của round kế tiếp. Final-test chỉ được mở và
-đánh giá sau khi toàn bộ adaptive loop đã kết thúc.
-
-```text
-Student checkpoint
-    -> frozen deterministic five-way split before inference
-    -> non-final HANS predictions
-    -> [teacher critic estimates error probabilities
-    -> teacher discovers failure hypotheses
-    -> controlled probe generation and pre-outcome validation
-    -> one-shot student verification
-    -> verification LCB certification
-    -> structured synthetic NLI generation and QC
-    -> disjoint fresh-checkpoint pilots
-    -> gain estimate and UCB
-    -> cost-aware STOP/CONTINUE
-       -> STOP: no training
-       -> CONTINUE: one fresh full LoRA -> gain_eval -> updated checkpoint] x T
-    -> one post-loop final-test evaluation
-```
-
-`run_main_active_learning.py` là multi-round implementation. Các stage scripts
-riêng vẫn tồn tại để reproduce one-round/debug runs.
-
----
-
-## 2. Ký hiệu
-
-| Ký hiệu | Ý nghĩa trong code |
-|---|---|
-| \(h\) | Failure hypothesis do teacher sinh |
-| \(K\) | Số hypothesis tối đa được tính trong union bound |
-| \(T\) | Maximum round count được pre-register trong confidence bound |
-| \(Z_{h,i}\) | Binary verification outcome của controlled set thứ \(i\) |
-| \(n_h\) | Số valid controlled sets của hypothesis \(h\) |
-| \(\widehat\nu_h\) | Empirical controlled-failure frequency |
-| \(r_v(h)\) | Verification confidence radius |
-| \(\tau_v\) | Verification threshold |
-| \(X_{h,j}\) | Gain quan sát được ở pilot \(j\) |
-| \(m_h\) | Số pilot thực sự chạy được |
-| \(\widehat\Delta_h\) | Mean pilot gain |
-| \(M\) | Bound giả định \(|X_{h,j}|\le M\) |
-| \(b_h\) | Gain confidence radius |
-| \(C(h)\) | Tổng component cost đã quy đổi về currency/unit cấu hình |
-| \(\lambda\) | Cost coefficient `lambda_cost` |
-| \(\widehat J(h)\) | Estimated net value |
-| \(U(h)\) | Optimistic net value dùng để rank và stop |
-
----
-
-## 3. Config và entry points
-
-| Stage | Config | Entry point |
-|---|---|---|
-| Initial HANS evaluation | `configs/hans_qwen17b.yaml` | `scripts/evaluate_hans.py` |
-| Hypothesis discovery | `configs/main_hypothesis_discovery.yaml` | `scripts/build_hypotheses.py` |
-| Verification | `configs/main_verification.yaml` | `scripts/verify_hypotheses.py` |
-| Synthetic generation | `configs/main_synthetic_generation.yaml` | `scripts/generate_synthetic_interventions.py` |
-| Pilot gain | `configs/main_pilot_gain.yaml` | `scripts/run_main_pilot_gain.py` |
-| Cost-aware decision | `configs/main_cost_aware.yaml` | `scripts/run_main_decision.py` |
-| Multi-round main | `configs/main_multiround.yaml` | `scripts/run_main_active_learning.py` |
-| Frozen Stage 2 data | `configs/stage2_benchmark.yaml` | `scripts/prepare_stage2_benchmark.py` |
-| Fair Stage 2 run | `configs/stage2_benchmark.yaml` | `scripts/run_stage2_benchmark.py` |
-
-Các main configs kế thừa `configs/main_common.yaml`; teacher identity phải được
-freeze rõ ràng. Teacher lỗi làm pipeline dừng, không fallback ngầm sang HANS oracle.
+Entry point chuẩn hiện tại là:
 
 ```bash
-python scripts/evaluate_hans.py --config configs/hans_qwen17b.yaml
-
-python scripts/build_hypotheses.py \
-  --config configs/main_hypothesis_discovery.yaml \
-  --run-dir outputs/<existing_run>
-
-python scripts/verify_hypotheses.py \
-  --config configs/main_verification.yaml \
-  --run-dir outputs/<existing_run>
-
-python scripts/generate_synthetic_interventions.py \
-  --config configs/main_synthetic_generation.yaml \
-  --run-dir outputs/<existing_run>
-
-python scripts/run_main_pilot_gain.py \
-  --config configs/main_pilot_gain.yaml \
-  --run-dir outputs/<existing_run>
-
-python scripts/run_main_decision.py \
-  --config configs/main_cost_aware.yaml \
-  --run-dir outputs/<existing_run>
+POOL_CUDA_DEVICE=0 RUN_CUDA_DEVICE=1 ./run_ours_verified_v5.sh
 ```
 
-Mọi main stage kiểm tra:
+Protocol v5 cố định seed 42 và maximum budget 128. Discovery và verification được tái sử dụng từ artifact v2 đã hoàn tất; v5 sinh lại synthetic pool, chấm toàn bộ pool bằng student, chọn dữ liệu bằng difficulty cộng contextual novelty, huấn luyện CE theo bốn round và áp dụng stopping protocol kế thừa từ v4.
 
-```yaml
-mode: llm_main
-oracle_debug: false
-```
+Tại thời điểm audit tài liệu này, run v5 seed 42 đã hoàn tất:
 
-để tránh trộn artifact main với oracle/debug.
+- synthetic pool: 480 examples được sinh, 476 examples/238 complete pairs được chấp nhận;
+- training: dùng đủ 128 examples qua 4 round, không early-stop;
+- HANS final accuracy: 0.6482;
+- HANS final non-entailment accuracy: 0.3648;
+- MNLI matched/mismatched: 0.5881/0.5894.
+
+Các số trên chỉ là kết quả seed 42. Không được viết chúng thành guarantee của thuật toán. Phiên bản cũ của tài liệu được giữ ở `Flow_legacy.md` để truy vết lịch sử; nó không phải source-of-truth cho v5.
 
 ---
 
-## 4. Stage 0 — Student NLI và initial HANS evaluation
+## 1. Tóm tắt đóng góp của flow mới
 
-### 4.1 Student prompt
+Flow cũ có hai điểm dễ làm mất hypothesis hữu ích và làm giảm chất lượng acquisition:
 
-`QwenNLIStudent.format_prompt` dùng:
+- chỉ giữ hypothesis đã được Hoeffding LCB certify, vì vậy một hypothesis có empirical failure rate cao nhưng interval còn rộng có thể bị loại như thể nó đã bị bác bỏ;
+- selector cũ cân bằng hoặc phân bổ bằng các quota/score dựa mạnh vào verification controls, thay vì trực tiếp ưu tiên các synthetic target mà student hiện tại thấy khó và loại redundancy ở mức biểu diễn.
 
-```text
-System:
-Classify natural-language inference. Choose exactly one label:
-entailment, neutral, or contradiction.
+Flow v5 thay bằng hai nguyên tắc:
 
-User:
-Premise: <premise>
-Hypothesis: <hypothesis>
-Label:
-```
+### 1.1 Confidence-safe retention
 
-Nếu tokenizer có chat template, code dùng template với
-`add_generation_prompt=True`. Code thử tắt thinking bằng
-`enable_thinking=False`; nếu model không hỗ trợ argument thì gọi lại không có nó.
-
-### 4.2 Prediction bằng candidate scoring
-
-Student không generate free-form text. Với mỗi input, code chấm ba continuation:
-
-```text
- entailment
- neutral
- contradiction
-```
-
-Với candidate label \(y\), score là mean token log-likelihood:
+Một hypothesis chỉ bị loại khi dữ liệu verification đủ mạnh để **bác bỏ** nó:
 
 \[
-s(y\mid x)=\frac{1}{|y|}\sum_{t=1}^{|y|}
-\log p_\theta(y_t\mid x,y_{<t}).
+\operatorname{UCB}_h < \tau_v.
 \]
 
-Prediction:
+Hypothesis đã certify và hypothesis chưa ngã ngũ đều được giữ:
 
 \[
-\widehat y=\arg\max_{y\in
-\{\text{entailment},\text{neutral},\text{contradiction}\}}s(y\mid x).
+\mathcal H_{\mathrm{keep}}
+=\mathcal H_{\mathrm{certified}}\cup\mathcal H_{\mathrm{unresolved}}.
 \]
 
-Mỗi example vì thế luôn nhận một canonical MNLI label.
+Cách làm này không hạ ngưỡng Hoeffding và không tuyên bố unresolved là đúng. Nó chỉ tránh đồng nhất “chưa đủ bằng chứng để certify” với “đã có bằng chứng để loại”.
 
-### 4.3 Mapping sang HANS
+### 1.2 Student-aware entropy-novelty acquisition
 
-\[
-g(y)=
-\begin{cases}
-\text{entailment}, & y=\text{entailment},\\
-\text{non-entailment}, & y\in\{\text{neutral},\text{contradiction}\}.
-\end{cases}
-\]
+Sau khi QC, student base checkpoint chấm mọi synthetic example đúng một lần. Với mỗi complete pair, selector:
 
-`predictions.jsonl` chứa premise, hypothesis, HANS gold, binary prediction,
-correctness, heuristic, subcase và raw three-class prediction.
+- dùng NLL của gold label để phát hiện target mà student đang gán xác suất thấp cho nhãn đúng;
+- dùng entropy để nhận diện vùng student còn phân vân;
+- dùng embedding của chính student để giảm trùng lặp ngữ nghĩa;
+- trước hết chọn một pair cho mỗi retained hypothesis như một coverage constraint;
+- sau đó greedy chọn các pair còn lại bằng difficulty cộng novelty.
 
-### 4.4 Training objective
-
-Training dùng cùng prompt. Target là label cộng EOS. Prompt tokens được mask bằng
-`-100`, nên loss chỉ tính trên label tokens:
-
-\[
-\mathcal L(\theta)=-\sum_{t\in\text{label tokens}}
-\log p_\theta(y_t\mid x,y_{<t}).
-\]
-
-Đây là standard per-example causal-LM cross-entropy với LoRA. Pair structure chỉ
-điều khiển data selection; code không có contrastive hoặc pairwise loss.
+Controls vẫn quan trọng để tạo pair và làm diagnostic, nhưng không còn là hard certification gate và không được dùng để làm một target khó trở nên “dễ” trong difficulty score.
 
 ---
 
-## 5. Stage 1 — Deterministic five-way split
+## 2. End-to-end flow
 
-Input main method là một `predictions.jsonl` chưa có `split_role`. Stable IDs được
-rank bằng:
+```text
+Frozen HANS manifest (seed-independent)
+    |
+    +--> discovery split
+    |      -> base-student predictions + gold correctness
+    |      -> gold-blind teacher critic estimates error probability
+    |      -> diversity-aware evidence sampling
+    |      -> teacher proposes exactly five falsifiable hypotheses
+    |
+    +--> verification split + new controlled probes
+    |      -> target / counterfactual control / invariant control
+    |      -> independent QC call before student outcomes
+    |      -> adaptive looks at n = 20, 30, 40, 50, 60
+    |      -> simultaneous Hoeffding interval
+    |      -> state = certified / unresolved / refuted
+    |
+    +--> confidence-safe retention
+    |      -> keep certified + unresolved
+    |      -> exclude only UCB < tau_v
+    |
+    +--> fresh synthetic generation from intervention seeds
+    |      -> counterfactual and invariant complete pairs
+    |      -> teacher QC + deterministic structural checks
+    |      -> duplicate/leakage filtering
+    |
+    +--> base-student acquisition scoring over the accepted pool
+    |      -> gold NLL + normalized entropy
+    |      -> contextual embeddings
+    |      -> one coverage pair per retained hypothesis
+    |      -> greedy difficulty + novelty until 64 pairs
+    |
+    +--> cumulative LoRA CE training, 32 examples/round
+    |      -> frozen 900-example stopping_eval after each round
+    |      -> paired gain diagnostics + practical patience rule
+    |      -> at most 4 rounds / 128 examples
+    |
+    +--> checkpoint fixed
+           -> one held-out 2,850-example gain report
+           -> one sealed 15,000-example HANS final evaluation
+           -> MNLI matched/mismatched evaluation
+           -> leakage audit and report
+```
 
-\[
-q_i=\operatorname{SHA256}(\text{split_seed}:\text{example_id}_i).
-\]
+Hai stage GPU trong shell script là tuần tự, không chạy đồng thời. `POOL_CUDA_DEVICE` dành cho teacher generation; `RUN_CUDA_DEVICE` dành cho student scoring/training/evaluation. Khi chỉ expose một physical GPU qua `CUDA_VISIBLE_DEVICES`, process nhìn nó như local `cuda:0`.
 
-| Role | Default fraction | Chức năng |
+---
+
+## 3. Ký hiệu
+
+| Ký hiệu | Ý nghĩa |
+|---|---|
+| \(h\) | một failure hypothesis |
+| \(K\) | số hypothesis tối đa trong simultaneous bound; ở đây \(K=5\) |
+| \(\tau_v\) | verification threshold; ở đây \(0.5\) |
+| \(Z_{h,i}\) | target-failure outcome nhị phân của probe set thứ \(i\) |
+| \(n_h\) | số valid probe sets đã đánh giá cho \(h\) |
+| \(\widehat\nu_h\) | empirical target-failure rate |
+| \(r_h\) | Hoeffding confidence radius |
+| \(L_h,U_h\) | lower/upper confidence bound của \(h\) |
+| \(x=(p,q,y)\) | một NLI example gồm premise, hypothesis, gold label |
+| \(s_y(x)\) | mean token log-likelihood score của candidate label \(y\) |
+| \(p_y(x)\) | softmax probability trên ba candidate label |
+| \(NLL(x)\) | negative log probability của gold label |
+| \(H(x)\) | entropy chuẩn hóa của phân phối ba nhãn |
+| \(e(x)\) | contextual embedding L2-normalized của example |
+| \(D_j\) | difficulty của synthetic pair \(j\) |
+| \(N(j\mid S)\) | novelty của pair \(j\) so với tập pair đã chọn \(S\) |
+| \(G_t\) | paired accuracy gain sau training round \(t\) |
+
+Trong HANS, nhãn evaluation là binary `entailment`/`non-entailment`. Trong synthetic training và MNLI, label space là ba nhãn `entailment`, `neutral`, `contradiction`. Code không tự ý coi hai không gian nhãn này là giống nhau.
+
+---
+
+## 4. Frozen data protocol và information firewall
+
+### 4.1 Five-way HANS split
+
+Toàn bộ 30,000 HANS examples được partition một lần bằng hash với `split_seed = 20261011`:
+
+| Role | Số examples | Được dùng để làm gì |
 |---|---:|---|
-| `hypothesis_discovery` | 0.125 | Critic và hypothesis discovery |
-| `verification` | 0.125 | Context sinh verification probes mới |
-| `intervention_pool` | 0.125 | Seed sinh synthetic training pairs |
-| `gain_eval` | 0.125 | Applicability và gain evaluation |
-| `final_test` | 0.500 | Final evaluation sau frozen CONTINUE |
+| `hypothesis_discovery` | 3,750 | phát hiện lỗi và sinh hypothesis |
+| `verification` | 3,750 | context cho controlled verification |
+| `intervention_pool` | 3,750 | seed/context để sinh dữ liệu can thiệp |
+| `gain_eval` | 3,750 | stopping và held-out gain report |
+| `final_test` | 15,000 | final HANS evaluation duy nhất |
 
-Code kiểm tra:
+Frozen manifest hash của benchmark hiện tại là:
 
-1. ID tồn tại và unique.
-2. Năm role pairwise disjoint.
-3. Hợp của năm role phủ toàn bộ source IDs.
-4. Mọi stage reconstruct đúng split và match `hans_split_v2.json`.
-5. Artifact nguồn đã có `split_role` bị từ chối.
+```text
+871e205c39611510aa92bfd37405fcdc0b120fb9c149779fd3b3237115d4a0f0
+```
 
-Đây là hash split, không stratify theo gold, heuristic hoặc subcase.
+Đây là global deterministic hash split, không phải stratified split. Cân bằng ở stopping subset được thực hiện sau đó và không làm thay đổi five-way manifest.
 
-### Stage 2 sealed data firewall
+### 4.2 Tách `gain_eval`
 
-`prepare_stage2_benchmark.py` tạo manifest trước inference, đánh giá chỉ non-final
-roles và ghi final-test vào sealed artifact riêng. Round artifacts chỉ có final
-IDs; không có input, label, prediction hoặc metric. `run_main_active_learning.py`
-chỉ đọc sealed artifact sau khi mọi acquisition/training/STOP decision đã freeze.
-Standalone legacy evaluation scripts vẫn có thể đánh giá full HANS và không được
-dùng làm Stage 2 benchmark input.
+`gain_eval` được chia prediction-blind thành:
 
-Trong fixed-budget benchmark, các checkpoint trung gian chỉ được đánh giá post
-hoc trên `gain_eval` để tạo accuracy-vs-examples/cost curves. Sealed `final_test`
-được mở đúng một lần cho final checkpoint; MNLI matched/mismatched cũng chỉ được
-đánh giá sau khi acquisition và training đã kết thúc. ID overlap làm run không
-hợp lệ; lexical near-duplicate audit được log sau training và không được dùng để
-thay đổi acquisition.
+- `stopping_eval`: 900 examples, đúng 30 examples cho mỗi một trong 30 HANS subcases;
+- `gain_report`: 2,850 examples còn lại, chỉ mở sau khi checkpoint đã được chọn.
+
+Membership được xếp hạng bằng SHA-256 dựa trên manifest hash, namespace và ID. Selection chỉ đọc `id`, `subcase`, `heuristic`, `gold`, không đọc prediction/correctness. Partition hash là:
+
+```text
+2be4c5e62e2983b565a254b894fce2ff4ed8358adad9371629a8900bc1cddaff
+```
+
+### 4.3 Final-test firewall
+
+Trong adaptive loop, final-test text không được cấp cho discovery, verification, synthetic generation, acquisition hoặc stopping. Chỉ final IDs nằm trong frozen manifest. Sau khi final checkpoint được cố định, code mới materialize sealed final rows và đánh giá đúng một lần.
+
+Sau evaluation, code audit ID overlap giữa selected training rows và final-test. Near-duplicate protection đối với final-test không được dùng trước selection vì làm vậy sẽ mở held-out text; do đó paper phải mô tả chính xác rằng pre-training leakage index bao phủ các non-final roles, còn final-test được audit post hoc theo firewall.
 
 ---
 
-## 6. Stage 2 — Critic và failure-hypothesis discovery
+## 5. Student model và NLI scoring
 
-### 6.1 Gold-blind error critic
+Student mặc định là `Qwen/Qwen3-1.7B`. Cùng một formatted chat prompt được dùng cho inference, difficulty scoring, embedding extraction và training-token construction.
 
-`TeacherErrorProbabilityScorer` ước lượng:
-
-\[
-e_i=P(\text{student prediction is wrong}\mid
-x_i,\widehat y_i,c_i),
-\]
-
-với \(c_i\) là optional confidence.
-
-Critic chỉ nhận:
-
-```text
-id
-premise
-hypothesis
-prediction
-confidence, nếu source record có
-```
-
-Critic không nhận gold, correctness, HANS heuristic/subcase hoặc record ngoài
-`hypothesis_discovery`. `evaluate_hans.py` hiện không ghi confidence, nên default
-pipeline thường chạy critic không có signal này.
-
-Payload yêu cầu standalone JSON:
-
-```json
-{
-  "scores": [
-    {
-      "example_id": "one supplied ID",
-      "error_probability": 0.0,
-      "rationale": "short explanation"
-    }
-  ]
-}
-```
-
-Response phải có đúng một score cho từng ID, không ID lạ/trùng và probability
-finite trong `[0,1]`. Code không calibrate các probability này; chúng là
-teacher-estimated scores dùng để sampling.
-
-### 6.2 Error và correct pools
-
-Sau critic scoring, code dùng ground-truth `correct` để tách:
-
-```text
-error pool   = prediction thực sự sai
-correct pool = prediction thực sự đúng
-```
-
-Chỉ critic là gold-blind. Discovery tổng thể là supervised failure analysis trên
-labeled split.
-
-### 6.3 Error sampling
-
-Ba strategy được hỗ trợ.
-
-Normalization:
+Với mỗi input \(x\), model không generate nhãn tự do. Code nối lần lượt ba candidate strings và tính mean conditional log-likelihood trên các token của candidate:
 
 \[
-w_i=\frac{e_i}{\sum_j e_j}.
+s_y(x)=\frac{1}{|T_y|}\sum_{k\in T_y}
+\log P_\theta(t_k\mid \operatorname{prompt}(x),t_{<k}).
 \]
 
-Threshold:
+Mean theo token làm giảm thiên lệch do candidate label có độ dài token khác nhau. Phân phối ba nhãn dùng trong acquisition là:
 
 \[
-i\text{ eligible}\iff e_i\ge\eta.
+p_y(x)=\frac{\exp s_y(x)}
+{\sum_{c\in\mathcal Y}\exp s_c(x)},
+\qquad
+\mathcal Y=\{E,N,C\}.
 \]
 
-Threshold không có fill policy; prompt có thể nhận ít hơn budget.
+Prediction là \(\arg\max_y s_y(x)\). Đây là probability được chuẩn hóa trên đúng ba verbalized candidates, không phải xác suất calibrated tuyệt đối của toàn vocabulary.
 
-Strategy tên `exponential` thực tế dùng logistic weight:
+---
+
+## 6. Discovery: từ lỗi quan sát đến hypothesis có thể kiểm chứng
+
+### 6.1 Critic và vai trò của gold label
+
+Discovery tổng thể **có dùng gold label** để biết student đúng hay sai. Tuy nhiên teacher critic được thiết kế gold-blind: mỗi record critic nhận premise, hypothesis, student prediction và optional model confidence, nhưng không nhận gold label. Critic trả một error probability \(e_i\in[0,1]\).
+
+Sau critic scoring, pipeline mới dùng gold correctness đã có trong benchmark để tách error pool và correct-contrast pool. Vì vậy không được viết rằng “toàn bộ discovery là gold-free”; phát biểu đúng là “critic call không thấy gold label”.
+
+Ở seed 42, base student sai 1,343 và đúng 2,407 trên 3,750 discovery examples.
+
+### 6.2 Weighted evidence sampling
+
+Critic score được đổi thành sampling weight qua logistic transform:
 
 \[
-w_i=\sigma(\beta(e_i-\alpha))
-=\frac{1}{1+\exp[-\beta(e_i-\alpha)]}.
+w_i=\sigma\bigl(\beta(e_i-\alpha)\bigr),
+\qquad \alpha=0.5,\;\beta=10.
 \]
 
-Weighted sampling without replacement dùng exponential-race priority:
+Exponential-race key được tính như sau:
 
 \[
 k_i=\frac{-\log U_i}{w_i},\qquad U_i\sim\operatorname{Uniform}(0,1),
 \]
 
-rồi chọn các key nhỏ nhất. Vì vậy tên `exponential` không có nghĩa
-\(w_i=\exp(\beta e_i)\). Paper và code phải thống nhất điểm này.
+và lấy các key nhỏ nhất. Đây là weighted sampling without replacement; không nên mô tả sai thành “sample theo \(\exp(e_i)\)”. Diversity bucket được dùng để tránh evidence bị thống trị bởi một pattern gần như giống nhau.
 
-Default:
+Teacher nhận tối đa:
 
-```yaml
-max_error_examples: 80
-sampling_strategy: exponential
-sampling_alpha: 0.5
-sampling_beta: 10.0
-```
+- 80 observed-error examples;
+- 20 correct but critic-high-score contrast examples.
 
-### 6.4 Correct contrasts
+Các correct contrasts giúp teacher phân biệt một cơ chế lỗi thật với các false alarm có hình thức bề mặt tương tự.
 
-Default `highest_error_score` lấy tối đa 20 correct records có critic error score
-cao nhất. Đây là challenging false alarms, giúp teacher phân biệt failure pattern
-thật với surface pattern trông khó nhưng student vẫn đúng.
+### 6.3 Hypothesis schema và diversity
 
-### 6.5 Hypothesis prompt và schema
+Teacher `Qwen3-14B` phải trả đúng năm hypothesis theo schema, gồm tên, mô tả, predicted failure behavior/labels, verification criteria, intervention target và unique support IDs. Candidate hypotheses có token-Jaccard tối đa 0.78. Invalid JSON, thiếu field hoặc duplicate support IDs được retry; duplicate IDs có thể được chuẩn hóa khi an toàn và phải được log.
 
-Teacher nhận selected errors/correct contrasts với:
+Kết quả discovery là đề xuất cơ chế có thể bị falsify, chưa phải bằng chứng rằng cơ chế đúng. Verification stage chịu trách nhiệm kiểm tra bước đó.
 
-```text
-id, premise, hypothesis, gold, prediction, correct, optional confidence
-```
+## 7. Controlled verification và Hoeffding states
 
-Không truyền `heuristic` hoặc `subcase`. Teacher phải trả tối đa 5 hypotheses:
+### 7.1 Cấu trúc một probe set
 
-```json
-{
-  "hypotheses": [
-    {
-      "name": "non-empty string",
-      "description": "non-empty string",
-      "predicted_failure_behavior": "measurable behavior",
-      "predicted_failure_labels": ["entailment or non-entailment"],
-      "verification_criteria": ["outcome-independent rule"],
-      "intervention_target": "what new NLI pairs should exercise",
-      "support_example_ids": ["IDs shown to teacher"]
-    }
-  ]
-}
-```
+Mỗi verification set gồm ba premise-hypothesis pairs khác nhau:
 
-Prompt yêu cầu compact, falsifiable hypotheses; criteria phải quyết định được từ
-premise/hypothesis mà không nhìn student prediction. Support IDs phải thực sự đã
-được đưa cho teacher. Main hypothesis bắt buộc có `source=llm_teacher`,
-`heuristic=null`, non-empty behavior/target/criteria/support IDs.
+1. **Target**: hiện thực hóa cơ chế được hypothesis dự đoán. Gold binary HANS label và predicted wrong label được khai báo trước khi student inference.
+2. **Counterfactual control**: thay đổi quan hệ quyết định sao cho exact MNLI label được validator xác nhận.
+3. **Invariant control**: thay đổi chi tiết không liên quan, exact MNLI label phải được giữ theo thiết kế.
 
-Nếu selected error list rỗng, code không gọi hypothesis teacher và ghi
-`no_discovery_errors`.
+Ba pair phải pairwise-distinct. Probes là dữ liệu verification-only và không bao giờ được đưa vào training pool.
 
----
-
-## 7. Stage 3 — Controlled failure verification
-
-Verification records không được dùng trực tiếp để đo lại error rate. Chúng chỉ
-làm context để teacher tạo **new controlled probe sets**.
-
-### 7.1 Verification context
-
-Với mỗi hypothesis, tối đa 24 records được chọn theo stable hash. Teacher chỉ thấy
-`id`, `premise`, `hypothesis` và `gold`; không thấy prediction, correctness,
-heuristic hoặc subcase.
-
-### 7.2 Probe-set structure
-
-Default sinh 50 sets/hypothesis, tối đa 8 sets/call. Mỗi set có đúng ba members:
-
-1. **Target**: thỏa hypothesized mechanism; có exact MNLI gold label và một
-   predeclared binary HANS failure label khác binary gold.
-2. **Counterfactual/positive control**: mechanism-relevant minimal change mà
-   correct behavior giúp phân biệt proposed mechanism.
-3. **Invariant control**: thay irrelevant entity/surface detail nhưng giữ nguyên
-   correct label.
-
-Teacher phải state labels trước khi student được query và không được copy/lightly
-paraphrase context. Mỗi probe có:
-
-```text
-premise
-hypothesis
-expected_label                 # exact three-class MNLI label
-expected_failure_label         # target only; binary HANS label
-label_rationale
-constraint_rationale
-```
-
-Target failure label phải thuộc hypothesis-declared labels và khác
-`mnli_to_hans(expected_label)`. Controls phải đặt failure label bằng `null`.
-
-### 7.3 Pre-outcome validation
-
-Một teacher call riêng independently solve exact NLI label và kiểm tra target /
-control function, ambiguity, grammar, originality. Response cho mỗi probe gồm:
-
-```text
-validated_label
-label_valid
-constraint_satisfied
-unambiguous
-grammatical
-original
-suitable_control
-reasons
-```
-
-Prompt yêu cầu reject thay vì repair và nhấn mạnh chưa có student prediction.
-“Independent” ở code nghĩa là call/prompt/seed khác và outcome-blind; generator
-và validator vẫn dùng cùng configured teacher model. Không nên gọi đây là
-independent-model validation trong paper.
-
-### 7.4 Fail-closed finalization
-
-Một set bị reject toàn bộ nếu bất kỳ member nào:
-
-- thiếu validation decision;
-- validated label khác generated expected label;
-- có một quality flag bằng `false`;
-- copy hoặc near-copy verification context;
-- duplicate trong set;
-- duplicate/near-duplicate probe set trước.
-
-Near duplicate dùng token-set Jaccard:
+Target-failure variable của protocol v2/v5 là:
 
 \[
-J(A,B)=\frac{|A\cap B|}{|A\cup B|},
+Z_{h,i}=
+\mathbf 1\{\widehat y_{h,i}^{\mathrm{target}}
+=y_{h}^{\mathrm{wrong,predeclared}}\}.
 \]
 
-với default threshold `0.92`. Code không repair probe rồi thử lại.
+Nó đo việc student có lặp lại đúng kiểu sai được hypothesis dự đoán hay không. Counterfactual/invariant correctness và strict-joint outcome vẫn được tính để diagnostic, nhưng không gate target-only certification.
 
-### 7.5 Freeze-before-observe invariant
-
-Cho mọi candidate hypotheses, code hoàn thành:
-
-```text
-generation -> validation -> deterministic finalization
-```
-
-trước khi instantiate student. Sau đó student được query đúng một lần trên frozen
-accepted collection. Không có teacher call sau khi student outcomes đã lộ ra.
-Điều này ngăn failure-conditioned retry và adaptive probe cherry-picking.
-
-### 7.6 Controlled binary outcome
-
-Với set \(i\) của hypothesis \(h\):
-
-```text
-T_hi = target maps to the predeclared wrong HANS label
-C_hi = counterfactual prediction equals exact MNLI label
-I_hi = invariant prediction equals exact MNLI label
-```
+Strict-joint diagnostic là:
 
 \[
-Z_{h,i}=\mathbf 1\{T_{h,i}\land C_{h,i}\land I_{h,i}\}.
+J_{h,i}=Z_{h,i}\,
+\mathbf 1\{\widehat y_{h,i}^{cf}=y_{h,i}^{cf}\}\,
+\mathbf 1\{\widehat y_{h,i}^{inv}=y_{h,i}^{inv}\}.
 \]
 
-Target được đánh giá ở binary HANS level, còn controls phải đúng exact three-class
-MNLI label. Generic target error không đúng predeclared failure label cho \(Z=0\).
-Target fail nhưng một control sai cũng cho \(Z=0\). Vì vậy \(Z\) đo một
-control-aware reproducible failure, không chỉ raw error rate.
+Việc bỏ \(J\) khỏi certification giải quyết một mismatch: controls được tạo để kiểm tra specificity và cung cấp cấu trúc training, nhưng lỗi label/QC hoặc độ khó của control không nên phủ nhận trực tiếp bằng chứng rằng target failure có tồn tại.
 
-### 7.7 Verification LCB
+### 7.2 Generation, QC và retry
+
+Teacher sinh probe theo structured JSON. Một reviewer call riêng kiểm tra labels và cấu trúc trước khi student outcomes được tính. Reviewer dùng cùng checkpoint teacher `Qwen3-14B`, nên “independent reviewer” ở đây nghĩa là separate call/role, **không phải một model độc lập**.
+
+Các safeguard chính:
+
+- tối đa 24 context records mỗi hypothesis;
+- generation tối đa 5 attempts/batch;
+- nếu multi-set response vẫn invalid, batch được giảm dần tới một set;
+- validator tối đa 5 attempts/batch và recursively split multi-set batch;
+- schema bắt buộc trả đúng một decision cho mọi supplied probe ID;
+- lexical anchors kiểm tra scenario adherence;
+- exact/near duplicate được lọc với token-Jaccard threshold 0.92;
+- invalid singleton chỉ được skip trong allowance đã định; nếu không, stage fail-closed.
+
+Các lỗi thực tế từng gặp gồm malformed standalone JSON, thiếu decision, ba roles dùng pair trùng nhau và near-duplicate với probe trước. Retry correction, batch splitting, checkpointing và exact-ID validation được thêm để tránh mất hàng giờ chạy rồi hỏng toàn stage.
+
+### 7.3 Adaptive looks
+
+Protocol cấu hình tối đa 60 valid sets/hypothesis, minimum 20, với looks:
+
+\[
+\mathcal L=\{20,30,40,50,60\}.
+\]
+
+Sau mỗi look, student outcomes mới được dùng để quyết định certify, refute hoặc tiếp tục. Teacher call sinh batch tiếp theo không nhận student outcomes trong prompt. Tuy nhiên toàn bộ 60 probes không được frozen trước look đầu: quyết định có sinh tiếp hay không vẫn phụ thuộc lịch sử outcomes. Vì vậy repeated-look factor phải xuất hiện trong confidence correction.
+
+### 7.4 Simultaneous Hoeffding interval
+
+Với \(n_h\) valid target outcomes:
 
 \[
 \widehat\nu_h=\frac{1}{n_h}\sum_{i=1}^{n_h}Z_{h,i}.
 \]
 
-Union-adjusted Hoeffding radius:
+Code dùng union-adjusted Hoeffding radius:
 
 \[
-r_v(h)=\sqrt{\frac{\log(4KT/\delta)}{2n_h}}.
+r_h=\sqrt{\frac{\log(4KT_{\mathrm{eff}}/\delta)}{2n_h}},
 \]
 
-\[
-LCB_v(h)=\widehat\nu_h-r_v(h).
-\]
-
-Certification:
+với \(K=5\), configured verification rounds bằng 1, 5 adaptive looks nên \(T_{\mathrm{eff}}=5\), và \(\delta=0.05\). Bounds dùng cho decision là:
 
 \[
-h\text{ certified}\iff LCB_v(h)\ge\tau_v.
-\]
-
-Code còn buộc `n_h >= min_valid_probe_sets`; nếu không, `certified=false` với
-status `unreliable_probe_design` dù numeric LCB vượt threshold.
-
-Default:
-
-```yaml
-delta: 0.05
-tau_v: 0.5
-n_probe_sets: 50
-min_valid_probe_sets: 40
-K: 5
-T: 5
-```
-
-Với 50 valid sets:
-
-\[
-r_v\approx0.244775,
+L_h=\widehat\nu_h-r_h,
 \qquad
-\widehat\nu_h\ge0.744775
+U_h=\min(1,\widehat\nu_h+r_h).
 \]
 
-mới certified. Với đúng 40 valid sets:
+Lower bound trong artifact có thể âm; code không clip nó về 0 trước certification.
+
+### 7.5 Ba trạng thái quyết định
+
+Với \(\tau_v=0.5\):
 
 \[
-r_v\approx0.273666,
-\qquad
-\widehat\nu_h\ge0.773666.
-\]
-
-### 7.8 Ý nghĩa lý thuyết
-
-LCB có diễn giải frequentist khi outcomes bounded và probe sets đủ độc lập. One-shot
-generation, controls, scenario separation và pre-outcome validation giảm
-adaptivity nhưng không chứng minh probes là iid. Certification không tự động là
-causal claim.
-
----
-
-## 8. Stage 4 — Synthetic intervention generation
-
-Chỉ hypothesis có `certified=true` mới được dùng.
-
-### 8.1 Seed selection
-
-Seed chỉ đến từ `intervention_pool`; tối đa 24 seeds/hypothesis được chọn bằng
-stable hash. Teacher nhận `id`, premise, hypothesis và `binary_gold`; không nhận
-student outcome, heuristic hoặc subcase. Seeds chỉ là structural context và prompt
-cấm copy/light paraphrase.
-
-### 8.2 Pair schedule
-
-Default cho mỗi certified hypothesis:
-
-```yaml
-counterfactual_pairs_per_hypothesis: 80
-invariant_pairs_per_hypothesis: 80
-reasoning_contrast_pairs_per_hypothesis: 0
-```
-
-Tổng 160 pairs = 320 examples trước QC. Mỗi pair có stable `pair_id`, `pair_type`
-và đúng hai member roles.
-
-**Counterfactual pair** có `base` và `relation_changed`: chỉ failure-relevant
-relation đổi và correct three-class label phải đổi.
-
-**Invariant pair** có `base` và `irrelevant_change`: chỉ irrelevant content đổi và
-correct label phải giữ nguyên.
-
-**Reasoning-contrast pair** có `base` và `reasoning_contrast`: hai members yêu cầu
-contrasting reasoning steps. Implementation có sẵn nhưng default count bằng 0.
-
-### 8.3 Explicit three-class labels
-
-Mỗi member được gán trực tiếp một trong:
-
-```text
-entailment
-neutral
-contradiction
-```
-
-Không convert tự động HANS `non-entailment` thành `contradiction`, vì binary
-non-entailment không phân biệt neutral và contradiction. Mỗi member/pair phải có
-label rationale, targeting rationale, pair rationale và cited seed IDs.
-
-### 8.4 Teacher QC
-
-Một call riêng đánh giá:
-
-```text
-label_consistent
-unambiguous
-grammatical
-relevant
-pair_structure_valid
-semantically_consistent
-diverse
-```
-
-Prompt yêu cầu reject thay vì repair. QC chỉ thấy generated examples và hypothesis;
-held-out text không được gửi vào generation/QC prompt. Generator và QC hiện vẫn
-dùng cùng teacher model nên lỗi giữa hai pass có thể tương quan.
-
-### 8.5 Deterministic pair-level filtering
-
-Code tiếp tục kiểm tra:
-
-1. Pair đủ đúng hai required member roles.
-2. Hai members có metadata, seed IDs và pair rationale nhất quán.
-3. Counterfactual labels phải khác nhau.
-4. Invariant labels phải giống nhau.
-5. Mọi teacher quality flag phải `true`.
-6. Premise/hypothesis length trong configured bounds.
-7. Không exact duplicate trong controlled pair.
-8. Không duplicate/near-duplicate generated examples của pair trước.
-9. Không exact/near overlap leakage references.
-
-Nếu một member fail, cả pair bị reject.
-
-Length filter hiện đếm số **unique tokens** do dùng `frozenset`, không phải tổng
-token occurrences. Cần sửa nếu paper định nghĩa sentence length bằng tokenizer
-length hoặc word count thông thường.
-
-### 8.6 Leakage index
-
-Sau khi teacher generation/QC hoàn tất, code mới tạo local signatures từ:
-
-```text
-intervention_pool
-hypothesis_discovery
-verification
-generated verification probes
-gain_eval
-```
-
-Leakage veto dùng exact SHA256 của normalized pair và token-set Jaccard. Raw
-held-out text không được gửi lại cho teacher.
-
-`final_test` cố ý không nằm trong leakage index để không materialize nó trước
-decision. Hệ quả là accidental synthetic/final-test overlap không được local veto
-phát hiện.
-
-### 8.7 Data-volume requirement
-
-Để chạy đủ default design cho một hypothesis:
-
-\[
-4\times32+128=256
-\]
-
-accepted examples là cần thiết. Generation tạo 320 examples, có rejection margin
-64. Code không buộc đạt 256; thiếu dữ liệu có thể dẫn tới ít pilot hơn hoặc full
-intervention nhỏ hơn requested size.
-
----
-
-## 9. Stage 5 — Outcome-independent gain-eval applicability
-
-Trước pilots, teacher operationalize hypothesis trên `gain_eval`. Teacher chỉ nhận
-`id`, premise, hypothesis và gold; không nhận prediction, correctness, heuristic
-hoặc subcase. Với mỗi record, teacher trả `applicable: boolean` cùng reason và một
-batch-level `testable` flag.
-
-Mục đích là chọn evaluation subgroup theo predeclared criteria mà không phụ thuộc
-student outcome. Nếu bất kỳ batch nào trả `testable=false`, whole hypothesis trở
-thành untestable với empty applicable IDs.
-
-Applicability được phép nhìn HANS gold. Nó outcome-independent đối với student
-nhưng không label-blind; paper cần mô tả đúng điều này.
-
----
-
-## 10. Stage 6 — Pilot interventions và gain estimation
-
-### 10.1 Default design
-
-```yaml
-m: 4
-pilot_train_size: 32
-gain_eval_size: 64
-M: 1.0
-delta: 0.05
-K: 5
-T: 1
-```
-
-`pilot_train_size` phải chẵn để giữ complete pairs.
-
-### 10.2 Disjoint deterministic selection
-
-Synthetic pairs và applicable evaluation records được stable-hash rank. Mỗi pilot
-lấy một contiguous non-overlapping train block và eval block. Trong cùng một
-hypothesis:
-
-- pilot train sets không overlap;
-- pilot eval sets không overlap;
-- complete pairs luôn được giữ nguyên;
-- pilot examples bị loại khỏi full reserve.
-
-Giữa các hypothesis, gain-eval IDs có thể overlap vì selection được xây riêng.
-
-### 10.3 Fresh-checkpoint invariant
-
-Mỗi pilot:
-
-1. derive deterministic seed;
-2. load fresh student từ đúng starting checkpoint;
-3. đo risk trước training;
-4. train fresh LoRA adapter;
-5. đo risk sau training trên cùng eval batch;
-6. lưu gain rồi release model.
-
-Không pilot nào bắt đầu từ adapter của pilot trước. Checkpoint descriptor và
-training config được lưu; decision stage kiểm tra chúng khớp full recipe.
-
-### 10.4 Risk và pilot gain
-
-\[
-R(f;D)=1-\operatorname{Accuracy}_{HANS}(f;D).
-\]
-
-\[
-X_{h,j}=R(f_0;D_{h,j})-R(f_{h,j};D_{h,j}),
-\]
-
-trong đó \(f_0\) là starting checkpoint, \(f_{h,j}\) là post-pilot model và
-\(D_{h,j}\) là pilot eval subset.
-
-```text
-X > 0: intervention giảm risk
-X = 0: không đổi
-X < 0: intervention làm tăng risk
-```
-
-Code kiểm tra risk trong `[0,1]` và \(|X|\le M\); không clip bound violations.
-
-### 10.5 Feasible pilot count
-
-\[
-m_h=\min\left(
-m,
-\left\lfloor\frac{N_{train,h}}{\text{pilot_train_size}}\right\rfloor,
-\left\lfloor\frac{N_{eval,h}}{\text{gain_eval_size}}\right\rfloor
-\right).
-\]
-
-Nếu \(m_h<m\), shortage được log. Nhưng nếu \(m_h\ge1\), code vẫn tạo estimate
-với actual \(m_h\). Chỉ \(m_h=0\) mới cho `insufficient_pilots`. Nếu theorem yêu
-cầu fixed \(m\), nên fail closed hoặc loại candidate khi thiếu pilot.
-
-### 10.6 Mean gain và UCB
-
-\[
-\widehat\Delta_h=\frac{1}{m_h}\sum_{j=1}^{m_h}X_{h,j}.
-\]
-
-\[
-b_h=M\sqrt{\frac{2\log(2KT/\delta)}{m_h}}.
-\]
-
-Gain interval:
-
-\[
-[\widehat\Delta_h-b_h,\widehat\Delta_h+b_h].
-\]
-
-Optimistic gain dùng cho decision:
-
-\[
-UCB_\Delta(h)=\widehat\Delta_h+b_h.
-\]
-
-### 10.7 Statistical limitation
-
-Bound giả định bounded, sufficiently independent pilot gains. Disjoint batches
-giảm direct reuse nhưng không chứng minh independence: data cùng teacher, LoRA
-runs cùng base/recipe, eval subsets là deterministic partitions, và across-hypothesis
-evaluation overlap có thể tồn tại. Interval là conditional concentration bound,
-không phải causal guarantee.
-
----
-
-## 11. Stage 7 — Cost-aware STOP/CONTINUE
-
-### 11.1 Full reserve
-
-Với mỗi hypothesis, code lấy complete pairs chưa dùng trong pilots, stable-hash
-rank và chọn tối đa `full_intervention_size: 128`. Size phải chẵn. Nếu chỉ còn ít
-hơn 128 examples, code lấy số đang có. Vì vậy đây là **maximum full size**, không
-phải exact required size. Empty reserve làm hypothesis không eligible.
-
-### 11.2 Cost definition
-
-`cost.type: full_pipeline` lưu component ledger gồm teacher input/output tokens,
-generation/QC, verification, pilots, LoRA training và evaluation. Ledger tách:
-
-1. `incurred_exploration`: resource đã tiêu trước decision và vẫn phải tính khi STOP;
-2. `projected_intervention`: marginal full-training/evaluation resource chưa commit;
-3. realized cumulative cost: incurred plus measured full training/evaluation
-   cost khi CONTINUE (GPU timing nếu runtime hỗ trợ), cộng final evaluation sau loop.
-
-Teacher tokens và pilot GPU time được đo khi provider/runtime cung cấp; full-run
-GPU time và USD rates là configured assumptions/projections. Shared calls được
-phân bổ một lần. Pipeline được tự động hóa hoàn toàn; cost schema chỉ chứa LLM
-inference, generation/QC, verification, pilot/full LoRA training và evaluation.
-
-### 11.3 Eligibility
-
-Một hypothesis vào decision set khi:
-
-1. verification certified;
-2. gain status là `estimated`, \(m_h>0\);
-3. \(\widehat\Delta_h\) và \(b_h\) tồn tại;
-4. có non-empty validated full reserve;
-5. pilot checkpoint và training recipe khớp current full recipe.
-
-### 11.4 Net-value equations
-
-\[
-\widehat J(h)=\widehat\Delta_h-\lambda C(h).
-\]
-
-\[
-U(h)=\widehat\Delta_h+b_h-\lambda C(h).
-\]
-
-Candidates được sort theo \(U(h)\) giảm dần, tie-break bằng hypothesis ID.
-
-### 11.5 Stopping rule
-
-\[
-h^*=\arg\max_{h\in\mathcal H_{eligible}}U(h).
-\]
-
-\[
-\text{action}=
+\operatorname{state}(h)=
 \begin{cases}
-\text{STOP}, & \mathcal H_{eligible}=\varnothing,\\
-\text{STOP}, & \max_h U(h)\le0,\\
-\text{CONTINUE with }h^*, & \max_h U(h)>0.
+\text{certified}, & L_h\ge\tau_v,\\
+\text{refuted}, & U_h<\tau_v,\\
+\text{unresolved}, & L_h<\tau_v\le U_h.
 \end{cases}
 \]
 
-CONTINUE không bảo đảm realized gain dương; nó chỉ nói positive net value chưa bị
-loại dưới optimistic bound và assumptions.
-
-### 11.6 Numeric behavior
-
-Với pilot count nhỏ, union-adjusted UCB có thể rất rộng. Phải report actual
-radius và không diễn giải CONTINUE là guaranteed profitability. Vì `C(h)` dùng
-currency cấu hình, không được thay số example count vào equation này.
-
-STOP/CONTINUE phụ thuộc actual pilot observations, configured rates/projections và
-remaining budget. Báo cáo phải lưu từng component thay vì chỉ một scalar tổng.
-
----
-
-## 12. Stage 8 — Frozen decision, full intervention, final test
-
-### 12.1 Freeze
-
-Code ghi `decision/candidates.json` và `decision/decision.json` trước training.
-Bytes của decision được giữ để xác nhận post-decision work không sửa quyết định.
-
-### 12.2 STOP
-
-STOP không load student, không train và không evaluate final-test trong decision
-script.
-
-### 12.3 CONTINUE
-
-1. Lấy non-pilot full reserve của selected hypothesis.
-2. Xác nhận actual training count bằng frozen selection plan; cost scalar được
-   kiểm tra riêng bằng component ledger.
-3. Load fresh student từ cùng starting checkpoint như pilots.
-4. Không promote/reuse pilot adapter.
-5. Train đúng một full LoRA với cùng recipe.
-6. Đo before/after risk trên full applicable `gain_eval` subset.
-7. Ghi metrics nhưng không recompute decision.
-8. Trong multi-round mode, ghi `next_checkpoint.json` và chưa mở final-test.
-9. Round kế tiếp dùng adapter vừa lưu làm starting checkpoint.
-10. Sau khi loop kết thúc mới mở sealed final-test và evaluate đúng post-loop.
-11. Xác nhận frozen decision bytes không thay đổi.
-
-Observed full gain:
+Điểm quan trọng nhất của v5 là:
 
 \[
-\Delta^{full}_{obs}=R(f_0;D_h^{gain})-R(f_h^{full};D_h^{gain}).
+\mathcal H_{\mathrm{retain}}
+=\{h:L_h\ge\tau_v\}\cup
+\{h:L_h<\tau_v\le U_h\}
+=\{h:U_h\ge\tau_v\}.
 \]
 
-Final-test không được dùng để chọn hypothesis, tune \(lambda\), thay decision hoặc
-chọn lại adapter.
+Chỉ \(U_h<\tau_v\) mới đủ bằng chứng để loại. Retention này khác “accept unresolved”: unresolved vẫn được ghi đúng trạng thái và chỉ được cấp cơ hội generation/acquisition.
+
+### 7.6 Bảo đảm không loại nhầm và giới hạn của nó
+
+Trên simultaneous confidence event
+
+\[
+\forall h,t:\quad |\widehat\nu_{h,t}-\nu_h|\le r_{h,t},
+\]
+
+nếu một hypothesis thật sự có \(\nu_h\ge\tau_v\), ta có
+
+\[
+U_{h,t}\ge\nu_h\ge\tau_v,
+\]
+
+nên nó không bị refute. Theo union-adjusted Hoeffding construction, xác suất event thất bại được kiểm soát bởi \(\delta\), với điều kiện outcomes bounded và concentration bound vẫn valid có điều kiện theo lịch sử adaptive.
+
+Đây là phát biểu xác suất có giả định, không phải “không bao giờ bỏ hypothesis tốt” theo nghĩa tuyệt đối. Nó cũng chỉ nói về true target-failure rate theo probe-generating distribution; nó không bảo đảm downstream training gain dương.
 
 ---
 
-## 13. Prompt infrastructure và reproducibility
+## 8. Verification seed 42 được tái sử dụng trong v5
 
-Mỗi teacher request gồm:
+Kết quả thực tế từ artifact v2:
 
-```text
-task
-prompt_version
-seed
-system_prompt
-payload
-request_id
+| Hypothesis | \(n\) | \(\widehat\nu\) | \(r\) | LCB | UCB | State | CF acc. | INV acc. | Joint rate |
+|---|---:|---:|---:|---:|---:|---|---:|---:|---:|
+| Subject-Object Reversal | 20 | 0.0000 | 0.4359 | -0.4359 | 0.4359 | refuted | 0.9000 | 0.5500 | 0.0000 |
+| General-to-Specific | 20 | 1.0000 | 0.4359 | 0.5641 | 1.0000 | certified | 0.5500 | 0.5000 | 0.0500 |
+| Contextual Invalidation | 60 | 0.5500 | 0.2517 | 0.2983 | 0.8017 | unresolved | 0.8333 | 0.7500 | 0.3833 |
+| Conditional Statement | 30 | 0.8667 | 0.3559 | 0.5107 | 1.0000 | certified | 0.8667 | 0.6000 | 0.3333 |
+| Entity Addition | 30 | 0.8667 | 0.3559 | 0.5107 | 1.0000 | certified | 1.0000 | 0.6667 | 0.6000 |
+
+Do đó v5 giữ bốn hypothesis: ba certified cộng `Contextual Invalidation` unresolved; chỉ loại `Subject-Object Reversal` vì UCB 0.4359 thấp hơn 0.5.
+
+Ví dụ `Contextual Invalidation` cho thấy vì sao \(\widehat\nu\) cao chưa đồng nghĩa LCB cao. Dù empirical rate là 0.55, radius ở \(n=60\) vẫn là 0.2517, nên LCB chỉ 0.2983. Certified-only flow loại nó; confidence-safe flow giữ nó vì UCB 0.8017 chưa cho phép bác bỏ.
+
+---
+
+## 9. Fresh synthetic intervention generation
+
+### 9.1 Generation schedule
+
+v5 tái sử dụng discovery/verification nhưng **sinh fresh synthetic pool**. Config đặt:
+
+```yaml
+counterfactual_pairs_per_hypothesis: 120
+invariant_pairs_per_hypothesis: 120
+stage2_generation_limit_examples: 480
+stage2_min_accepted_examples: 128
+stage2_max_generated_examples: 1600
 ```
 
-`request_id` là SHA256 của serialized request. Teacher calls/responses, versions,
-seeds và selection IDs được lưu làm audit trail.
+Tên hai config keys có hậu tố `per_hypothesis`, nhưng wrapper Stage 2 coi 120 và 120 là **global pair schedule** rồi chia đều qua retained hypotheses. Với bốn retained hypotheses, round đầu cấp cho mỗi hypothesis:
 
-Hugging Face teacher:
+- 30 counterfactual pairs;
+- 30 invariant pairs;
+- tổng 60 pairs = 120 examples.
 
-- dùng chat template nếu có;
-- JSON-serialize payload với sorted keys;
-- không truncate input âm thầm;
-- prompt vượt `max_input_tokens` làm stage fail;
-- `do_sample=False`;
-- response phải là standalone JSON object;
-- markdown/prose ngoài JSON hoặc schema sai làm stage fail;
-- không retry, repair JSON hoặc oracle fallback.
+Toàn pool ban đầu là 240 pairs = 480 examples. Cần mô tả behavior này theo code, không diễn giải literal rằng mỗi hypothesis nhận 240 pairs.
 
-Caveats:
+### 9.2 Pair semantics
 
-1. Greedy decoding làm seed thường không tạo sampling diversity. Payload/batch
-   index khác vẫn có thể cho output khác, nhưng seed không hoạt động như sampling.
-2. `prompt_version` là metadata/request identity; prompt text hard-code trong
-   Python. Đổi version string không tự chọn template implementation khác.
+Mỗi pair có đúng hai members và cùng `hypothesis_id`, `pair_id`, `pair_type`:
 
-| Chức năng | Default prompt version |
-|---|---|
-| Error critic | `discovery_error_probability_v1` |
-| Failure discovery | `failure_discovery_v1` |
-| Probe generation | `controlled_verification_probes_v1` |
-| Probe validation | `verification_probe_validation_v1` |
-| Synthetic generation | `targeted_synthetic_nli_pairs_v2` |
-| Synthetic QC | `synthetic_pair_quality_control_v2` |
-| Gain applicability | `hypothesis_operationalization_v1` |
+- counterfactual: `base` và `relation_changed`; hai gold labels phải khác nhau;
+- invariant: `base` và `irrelevant_change`; hai gold labels phải giống nhau.
 
-Paper-level reproducibility nên version hóa actual prompt templates bằng immutable
-files hoặc registry thay vì chỉ ghi free-form version string.
+`reasoning_contrast_pairs_per_hypothesis = 0` trong protocol này. Pair rationales, label rationales, targeting rationale và permitted seed IDs là các trường bắt buộc.
+
+Mỗi hypothesis dùng tối đa 24 intervention seed examples. Mỗi teacher call xoay 4 seeds, yêu cầu tối đa 4 pairs và retry tối đa 3 lần. Việc xoay subset nhỏ giảm xu hướng copy nguyên HANS templates và giữ structured response trong output-token limit.
+
+### 9.3 Fail-closed QC
+
+Một separate teacher QC call trả đúng một decision/example với bảy boolean flags:
+
+1. `label_consistent`;
+2. `unambiguous`;
+3. `grammatical`;
+4. `relevant`;
+5. `pair_structure_valid`;
+6. `semantically_consistent`;
+7. `diverse`.
+
+Tất cả phải true. QC xử lý tối đa 8 examples, tức 4 pairs/call, và retry tối đa 3 lần. Teacher không được sửa nhãn trong QC; questionable pair bị reject.
+
+Deterministic validator còn kiểm tra:
+
+- unique IDs và complete pair roles;
+- consistent pair metadata, seed IDs và rationale;
+- số unique normalized tokens của riêng premise và riêng hypothesis đều trong [3, 80];
+- counterfactual labels đổi và invariant labels giữ nguyên;
+- exact duplicate giữa hai controlled members bị reject;
+- exact/near duplicate với pair đã sinh và non-final leakage references bị reject;
+- near-duplicate threshold là token-Jaccard 0.92.
+
+Controlled members được phép gần nhau về lexical content vì bản chất intervention. Vì vậy validator không áp near-duplicate test giữa hai members cùng pair; chỉ exact duplicate trong pair là lỗi.
+
+Leakage index bao phủ `intervention_pool`, `hypothesis_discovery`, `verification`, generated verification probes và `gain_eval`. Raw leakage-reference text/signatures không được gửi trong teacher prompt.
+
+### 9.4 Underfill recovery
+
+Nếu accepted examples chưa đạt 128, generator lên kế hoạch round bổ sung. Gọi deficit là
+
+\[
+d=128-N_{accepted},
+\]
+
+observed acceptance rate là \(a=N_{accepted}/\max(1,N_{generated})\), và
+
+\[
+\widetilde a=\max(0.25,a).
+\]
+
+Số examples dự kiến cho round mới là:
+
+\[
+m=\max\left(
+64,\;2d,\;2\left\lceil\frac{d}{2\widetilde a}\right\rceil,\;4|\mathcal H_{retain}|
+\right),
+\]
+
+sau đó clip theo remaining generation capacity, làm tròn xuống số chẵn và chia gần đều cho counterfactual/invariant, đồng thời mỗi retained hypothesis phải nhận ít nhất một pair của mỗi loại. Nếu không đạt minimum trước cap 1,600, stage fail thay vì âm thầm chạy pool thiếu.
+
+### 9.5 Pool v5 seed 42 quan sát được
+
+Round 0 đã đủ nên không cần underfill round:
+
+| Hypothesis | Generated | Accepted | Accepted pairs |
+|---|---:|---:|---:|
+| General-to-Specific | 120 | 116 | 58 |
+| Contextual Invalidation | 120 | 120 | 60 |
+| Conditional Statement | 120 | 120 | 60 |
+| Entity Addition | 120 | 120 | 60 |
+| **Total** | **480** | **476** | **238** |
+
+Bốn rejected examples thuộc hai complete pairs của `General-to-Specific`. Validation và selection luôn xử lý ở complete-pair granularity.
+
+## 10. Confidence-safe entropy-novelty selector
+
+### 10.1 Vì sao phải chấm toàn bộ accepted synthetic pool
+
+Selector cần biết difficulty tương đối và khoảng cách biểu diễn giữa mọi candidate pair trước khi chọn subset. Vì vậy base student chạy qua toàn bộ 476 accepted examples hai lượt forward logic:
+
+1. candidate-label scoring để lấy \(p_y\), NLL và entropy;
+2. hidden-state extraction để lấy contextual embedding.
+
+Đây là acquisition cost một lần, không lặp sau mỗi selected pair hoặc mỗi LoRA round. Sau khi ranking 128 examples được lập, bốn round chỉ lấy các đoạn liên tiếp của kế hoạch đó.
+
+### 10.2 Gold NLL
+
+Với gold label \(y^*\):
+
+\[
+\operatorname{NLL}(x)=-\log\max(p_{y^*}(x),10^{-12}).
+\]
+
+NLL cao nghĩa là student gán xác suất thấp cho đáp án đúng. Nó bao phủ cả hai tình huống:
+
+- confidently wrong: gold probability rất nhỏ;
+- weakly correct/uncertain: gold probability chưa cao.
+
+Khác entropy, NLL dùng gold label và trực tiếp đo độ khó supervised. Nó không phải training loss đã backprop; ở đây chỉ là acquisition score từ frozen base student.
+
+### 10.3 Normalized entropy
+
+Với ba nhãn:
+
+\[
+H(x)=-\frac{1}{\log 3}\sum_{y\in\mathcal Y}
+p_y(x)\log\max(p_y(x),10^{-12}).
+\]
+
+Do chia cho \(\log 3\), \(H\in[0,1]\). Entropy cao khi student phân vân giữa các nhãn. Một confidently-wrong example có thể entropy thấp nhưng NLL cao, nên kết hợp hai đại lượng tránh bỏ mất loại hard example này.
+
+### 10.4 Robust global NLL normalization
+
+Difficulty chỉ dùng member `base` của mỗi pair. Gọi \(q_{0.1}\) và \(q_{0.9}\) là linear quantiles của target/base NLL trên toàn accepted pool. Code clip và scale:
+
+\[
+\widetilde{NLL}_j=
+\frac{\operatorname{clip}(NLL_j,q_{0.1},q_{0.9})-q_{0.1}}
+{q_{0.9}-q_{0.1}}.
+\]
+
+Nếu hai quantiles bằng nhau, mọi normalized NLL được đặt bằng 0.5. Global normalization giữ score có thể so sánh giữa hypotheses; quantile clipping ngăn vài outlier NLL chi phối toàn ranking.
+
+Pair difficulty là:
+
+\[
+D_j=
+\frac{0.65\,\widetilde{NLL}_j+0.35\,H_j}{0.65+0.35}
+=0.65\,\widetilde{NLL}_j+0.35\,H_j.
+\]
+
+Chỉ `base` member được dùng ở đây. Nếu average cả base và control, một control rất dễ có thể che một failure-targeting base rất khó.
+
+### 10.5 Contextual embedding
+
+Với cùng formatted NLI prompt, student trả final hidden layer \(h_{x,t}\) cho mỗi non-padding token. Example embedding là mask-aware mean pooling rồi L2 normalize:
+
+\[
+\bar e(x)=\frac{\sum_t m_t h_{x,t}}{\sum_t m_t},
+\qquad
+e(x)=\frac{\bar e(x)}{\|\bar e(x)\|_2}.
+\]
+
+Embedding được chuyển về CPU theo batch để không giữ một feature matrix lớn trên GPU. Đây là representation của student cho toàn premise-hypothesis prompt, không phải lexical bag-of-words và cũng không phải một embedding model bên ngoài.
+
+Với hai members \(x_j^{(1)},x_j^{(2)}\), pair embedding là normalized mean:
+
+\[
+e_j=\operatorname{norm}_2
+\left(\frac{e(x_j^{(1)})+e(x_j^{(2)})}{2}\right).
+\]
+
+### 10.6 Novelty
+
+Với tập pair đã chọn \(S\):
+
+\[
+N(j\mid S)=
+\begin{cases}
+1, & S=\varnothing,\\
+\operatorname{clip}_{[0,1]}
+\left(\dfrac{1-\max_{k\in S}e_j^\top e_k}{2}\right), & \text{otherwise}.
+\end{cases}
+\]
+
+Selector so candidate với **mọi pair đã chọn**, lấy maximum cosine similarity, rồi thưởng distance tới nearest semantic neighbor. Do vectors normalized, cosine nằm trong [-1,1] và phép chia 2 ánh xạ cosine distance về [0,1]. Novelty được tính lại sau mỗi greedy choice vì \(S\) thay đổi.
+
+Embedding novelty không bảo đảm các câu khác nhau về mọi khía cạnh; nó chỉ chống redundancy theo representation hiện tại của student. Lexical duplicate/leakage đã được validator xử lý trước đó.
+
+### 10.7 Coverage phase
+
+Budget 128 examples tương ứng 64 indivisible pairs. Trước greedy fill, selector chọn đúng một pair cho mỗi retained hypothesis. Với mỗi hypothesis, nó lấy candidate có \(D_j\) lớn nhất; ties được phá deterministic bằng SHA-256 của seed, phase và pair ID.
+
+Đây là minimum coverage constraint:
+
+\[
+\forall h\in\mathcal H_{retain}:\quad
+|S\cap\mathcal P_h|\ge1.
+\]
+
+Nó **không** phải equal quota. Nếu số available pair slots nhỏ hơn số retained hypotheses, selector raise error thay vì phá coverage guarantee.
+
+### 10.8 Greedy fill
+
+Sau coverage, mỗi bước chọn:
+
+\[
+j^*=\arg\max_{j\notin S}
+\left[D_j+\lambda_N N(j\mid S)\right],
+\qquad \lambda_N=0.50.
+\]
+
+Tie-breaking vẫn deterministic bằng seeded SHA-256. Cả hai members của pair được chọn cùng nhau. Thuật toán dừng khi đạt 64 pairs.
+
+Không có expected-gain model, hard label quota, hard pair-type quota hoặc equal hypothesis quota trong v5. Phân bổ nổi lên từ observed student difficulty và novelty sau minimum coverage.
+
+Nếu có \(M\) candidate pairs, cần chọn \(P\) pairs và embedding dimension là \(d\), naive greedy novelty có worst-case \(O(MP^2d)\) dot-product work. Với pool 238 pairs và \(P=64\), phần GPU forward thường đắt hơn phần greedy CPU.
+
+### 10.9 Selection seed 42 quan sát được
+
+Selected plan có 64 pairs/128 examples:
+
+| Hypothesis | Selected pairs | Verification state |
+|---|---:|---|
+| Contextual Invalidation | 1 | unresolved |
+| General-to-Specific | 12 | certified |
+| Conditional Statement | 50 | certified |
+| Entity Addition | 1 | certified |
+
+Pair types: 25 counterfactual và 39 invariant. Label counts trên 128 examples: 23 entailment, 71 neutral, 34 contradiction.
+
+Diagnostics:
+
+- mean selected target NLL: 7.9730;
+- mean normalized target entropy: 0.1630;
+- mean embedding novelty at selection time: 0.0226;
+- global target-NLL q10/q90: xấp xỉ \(1.92\times10^{-13}\) và 7.7683.
+
+Phân bổ 50/12/1/1 chứng minh selector không hard-code cân bằng hypothesis. Nó cũng là một limitation cần report: difficulty term đã tập trung mạnh vào `Conditional Statement`; coverage chỉ ngăn một hypothesis biến mất hoàn toàn, không ngăn concentration. Mean novelty thấp cho thấy accepted pool hoặc student representation chứa nhiều candidates rất gần nhau; novelty weight 0.5 không đủ tạo cân bằng cơ chế ở seed này.
 
 ---
 
-## 14. Artifact dependency graph
+## 11. Training protocol
 
-```text
-predictions.jsonl
-    ├── hypotheses.json
-    ├── hypothesis_evidence.json
-    ├── hans_split_v2.json
-    └── teacher_calls/discovery.jsonl
-            │
-            ▼
-verification/
-    ├── generated_probes.jsonl
-    ├── probes.jsonl
-    ├── rejected_probes.jsonl
-    ├── probe_set_outcomes.jsonl
-    └── results.json
-            │
-            ▼
-synthetic/
-    ├── generated.jsonl
-    ├── accepted.jsonl
-    ├── rejected.jsonl
-    └── manifest.json
-            │
-            ▼
-gain/
-    ├── pilot_observations.jsonl
-    ├── gain_eval_applicability.json
-    ├── gain_estimates.json
-    └── pilots/<hypothesis>/<pilot>/adapter/
-            │
-            ▼
-decision/
-    ├── candidates.json
-    ├── decision.json
-    ├── full_intervention/<hypothesis>/adapter/   # CONTINUE only
-    ├── post_intervention_metrics.json           # CONTINUE only
-    ├── final_test_predictions.jsonl             # CONTINUE only
-    └── final_test_metrics.json                  # CONTINUE only
-```
+Experiment B chia maximum budget 128 thành bốn stages:
 
-Các `teacher_calls/*.jsonl` là audit trail quan trọng cho prompt analysis và paper
-appendix; không nên chỉ giữ aggregate metrics.
+\[
+B_{round}=32,\qquad R_{max}=4.
+\]
+
+Full 128-example plan được lập một lần từ base checkpoint. Round \(t\) lấy slice \([32(t-1),32t)\). Student không re-score pool sau mỗi adapter update, nên stopping không thể retrospective thay đổi thứ tự acquisition.
+
+LoRA training là cumulative: adapter cuối round trước là starting checkpoint của round sau. Không train bốn adapter độc lập từ base.
+
+v5 command truyền `--ours-objective ce`, do đó objective thực tế là per-example causal-LM cross-entropy:
+
+\[
+\mathcal L_{CE}=-\sum_{x\in\mathcal B}
+\sum_{t\in \operatorname{label}(x)}
+\log P_\theta(t\mid \operatorname{prompt}(x),t_{<t}).
+\]
+
+Prompt tokens được mask bằng `-100`; loss chỉ áp trên gold label tokens và EOS. Cả hai members của selected pair đóng góp CE như hai examples có trọng số bằng nhau. Pair structure chỉ được dùng để generation, QC và indivisible selection; v5 CE không có contrastive hoặc consistency loss.
+
+Hyperparameters:
+
+| Tham số | Giá trị |
+|---|---:|
+| Epochs/round | 1 |
+| Microbatch | 4 examples |
+| Gradient accumulation | 8 |
+| Effective batch | 32 examples |
+| Learning rate | \(10^{-5}\) |
+| Weight decay | 0 |
+| Max grad norm | 1.0 |
+| LoRA rank / alpha | 8 / 16 |
+| LoRA dropout | 0 |
+| Target modules | q/k/v/o, gate/up/down projections |
+| Gradient checkpointing | true |
+| Max sequence length | 512 |
+| Model dtype | float32 |
+
+Với 32 examples, batch 4, accumulation 8 và một epoch, mỗi round ghi một optimizer step.
 
 ---
 
-## 15. End-to-end pseudo-code đúng implementation
+## 12. Adaptive stopping
+
+### 12.1 Paired marginal gain
+
+Sau mỗi round, checkpoint trước và sau được so sánh trên cùng 900 `stopping_eval` IDs. Với example \(i\):
+
+\[
+\Delta_{t,i}=
+\mathbf1\{\widehat y_{t,i}=y_i\}
+-\mathbf1\{\widehat y_{t-1,i}=y_i\}
+\in\{-1,0,1\}.
+\]
+
+Mean marginal gain và sample variance là:
+
+\[
+\bar G_t=\frac1n\sum_i\Delta_{t,i},
+\qquad
+s_t^2=\frac1{n-1}\sum_i(\Delta_{t,i}-\bar G_t)^2.
+\]
+
+Code tính empirical-Bernstein diagnostic với tối đa \(L=4\) looks:
+
+\[
+r_t^{EB}=
+\sqrt{\frac{2s_t^2\log(3L/\delta)}{n}}
++\frac{6\log(3L/\delta)}{n},
+\]
+
+\[
+LCB_t=\max(-1,\bar G_t-r_t^{EB}),
+\qquad
+UCB_t=\min(1,\bar G_t+r_t^{EB}).
+\]
+
+Trong v5/v4, interval này là diagnostic; decision rule thực tế là `practical_paired_gain_patience_v1` vì 900 examples làm conservative EB UCB quá rộng để trở thành gate hữu ích.
+
+### 12.2 Practical small-gain look
+
+Một look được coi là `small` khi đồng thời:
+
+\[
+\bar G_t\le0.003,
+\]
+
+\[
+\max_g G^{heuristic}_{t,g}\le0.005,
+\qquad
+\max_c G^{label}_{t,c}\le0.005,
+\]
+
+\[
+\min_g G^{heuristic}_{t,g}\ge-0.01,
+\qquad
+\min_c G^{label}_{t,c}\ge-0.01.
+\]
+
+Tức là overall marginal gain nhỏ, không group nào còn cải thiện đáng kể, và cũng không group nào regression quá 1 percentage point. Sau minimum 2 rounds, hai small looks liên tiếp (`patience = 2`) gây early stop.
+
+`maximum_small_gain_ucb = 0.02` vẫn được lưu trong config/result nhưng **không được dùng** bởi practical rule; nó chỉ có hiệu lực với `paired_empirical_bernstein_ucb_v1`. Tương tự, `minimum_optimistic_gain_per_gpu_hour = 0.0` vô hiệu hóa cost-efficiency stop.
+
+Một nuance quan trọng: regression tệ hơn -0.01 làm điều kiện `small` thành false, nên rule tiếp tục thay vì dừng vì harm. Do đó đây là diminishing-return rule, không phải harm-aware safety stop.
+
+Nếu stop, checkpoint sau round hiện tại là final checkpoint. Nếu không stop, protocol dùng checkpoint cuối ở budget 128; không chọn “best round” bằng stopping set.
+
+### 12.3 Trace seed 42
+
+| Round | Cumulative examples | Stopping accuracy | Marginal gain | EB UCB | Action |
+|---:|---:|---:|---:|---:|---|
+| 0 | 0 | 0.6322 | — | — | base |
+| 1 | 32 | 0.6356 | 0.00333 | 0.05207 | continue |
+| 2 | 64 | 0.6422 | 0.00667 | 0.05219 | continue |
+| 3 | 96 | 0.6456 | 0.00333 | 0.04624 | continue |
+| 4 | 128 | 0.6444 | -0.00111 | 0.03911 | maximum budget reached |
+
+Round 4 là small look đầu tiên, nên patience chưa đủ để stop; đồng thời đã đạt maximum budget. Kết quả là run dùng đủ 128 examples và trạng thái `complete`, không phải `complete_adaptive_stop`.
+
+## 13. Final evaluation và reporting
+
+Sau khi checkpoint được cố định, pipeline thực hiện:
+
+1. `gain_report` trên 2,850 examples đúng một lần;
+2. sealed HANS final-test trên 15,000 examples đúng một lần;
+3. MNLI validation matched và mismatched;
+4. post-training final-test leakage audit;
+5. ghi `result.json`, curves, predictions và markdown report.
+
+Metrics HANS gồm overall accuracy, entailment/non-entailment accuracy, accuracy theo heuristic và theo 30 subcases. MNLI báo accuracy riêng trên matched/mismatched.
+
+### 13.1 Kết quả v5 seed 42
+
+| Evaluation role | Examples | Overall accuracy | Non-entailment accuracy |
+|---|---:|---:|---:|
+| Held-out gain report | 2,850 | 0.6375 | 0.3551 |
+| Sealed HANS final | 15,000 | 0.6482 | 0.3648 |
+
+MNLI:
+
+| Split | Examples | Accuracy |
+|---|---:|---:|
+| matched | 9,815 | 0.5881 |
+| mismatched | 9,832 | 0.5894 |
+
+Final leakage audit pass: không có ID overlap hoặc near duplicate được phát hiện. Audit được thực hiện sau selection/training và không dùng để thay đổi training set.
+
+Chỉ có một seed nên các giá trị trên không cho phép ước lượng variance giữa seeds hoặc tuyên bố statistical superiority. Báo cáo hiện tại có thể hiển thị `± 0.0000` vì aggregation trên đúng một run; con số đó không phải confidence interval có ý nghĩa.
+
+---
+
+## 14. Cost accounting
+
+Result lưu cả raw usage và assumed monetary cost. Với seed 42 v5:
+
+| Resource | Measured value |
+|---|---:|
+| Teacher input tokens | 688,889 |
+| Teacher output tokens | 619,450 |
+| Generated items | 480 |
+| Verified synthetic items | 480 |
+| LoRA training runs | 4 |
+| LoRA training GPU seconds | 12.0079 |
+| Evaluation/acquisition items | 41,573 |
+| Evaluation/acquisition GPU seconds | 3,152.7314 |
+
+Với rates trong config, assumed total cost là 6.1913 USD. Đây là **normalized cost model**, không nhất thiết là hóa đơn thực tế của local GPUs hoặc Hugging Face inference. Các rates phải được report cùng số cost; không được nêu 6.1913 USD mà thiếu giả định.
+
+Token usage của v5 artifact có thể bao gồm reused teacher-call provenance trong pool directory. Vì v5 shell script không gọi lại discovery/verification teacher, cần phân biệt:
+
+- **marginal wall-clock/API cost của v5 rerun**: fresh synthetic generation/QC, student acquisition, training và evaluation;
+- **full-pipeline accounted cost**: provenance của cả discovery, verification và synthetic stages.
+
+Cost-axis learning curves loại post-hoc final-test evaluation và held-out gain-report evaluation, đúng theo flags trong result.
+
+---
+
+## 15. Flow cũ và flow v5
+
+| Thành phần | Flow cũ | Flow v5 | Lý do thay đổi |
+|---|---|---|---|
+| Verification metric | ban đầu strict-joint; sau đó target-only | target-only | controls không nên phủ nhận target failure |
+| Retention | certified-only: \(LCB\ge\tau_v\) | keep nếu \(UCB\ge\tau_v\) | không loại hypothesis chỉ vì interval rộng |
+| Unresolved state | bị loại như non-certified | được giữ, vẫn gắn nhãn unresolved | tách “không đủ bằng chứng” khỏi “bị bác bỏ” |
+| Synthetic pool | chỉ hypotheses certified | certified + unresolved | bảo toàn coverage của plausible mechanisms |
+| Allocation | hard balance hoặc verification-conditioned primal-dual | minimum coverage + emergent greedy allocation | tránh hard-code hypothesis distribution |
+| Controls | từng tham gia certification/specificity weight | diagnostic + pair construction | target difficulty là acquisition signal chính |
+| Utility | average/item NLL hoặc stratum utility | base-target gold NLL + entropy | giữ confidently-wrong và uncertain targets |
+| Diversity | lexical Jaccard hoặc score cũ | contextual student embedding novelty | giảm semantic redundancy theo student |
+| Ranking | có thể phụ thuộc quota/policy phức tạp | plan một lần, deterministic tie-break | reproducible và dễ audit |
+| Training objective | từng thử CE và pairwise | CE cho v5 main run | cô lập hiệu quả acquisition; pairwise là ablation |
+| Stopping | conservative EB UCB gate ở v3 | practical paired-gain patience ở v4/v5 | UCB trên n=900 quá rộng để dừng hữu ích |
+| Gain evaluation | cùng gain set cho adaptation/report | 900 stopping + 2,850 report | giảm adaptive reuse bias |
+
+Protocol v3 từng dùng control specificity:
+
+\[
+S_h=LCB_h-rac12[(1-A_h^{cf})+(1-A_h^{inv})].
+\]
+
+v5 không dùng đại lượng này trong selector. Controls vẫn được report để người đọc đánh giá specificity, nhưng không hạ sampling mass chỉ vì control accuracy thấp.
+
+---
+
+## 16. Các vấn đề đã gặp và cách giải quyết
+
+### 16.1 `nu_hat` cao nhưng LCB thấp
+
+Nguyên nhân là confidence radius lớn ở sample nhỏ và còn union correction qua hypotheses/looks. Giải pháp không phải hạ threshold hoặc bỏ Hoeffding, mà là dùng ba-state decision và chỉ refute bằng UCB. Khi cần certification mạnh hơn, tăng valid probes sẽ giảm radius theo \(O(n^{-1/2})\), nhưng teacher generation/QC cost tăng gần tuyến tính theo số probes.
+
+### 16.2 Certified-only loại hypothesis có tiềm năng
+
+`Contextual Invalidation` có \(\widehat\nu=0.55\) nhưng LCB 0.2983. Flow cũ loại nó; v5 giữ vì UCB 0.8017. Confidence-safe retention giải quyết false-discard risk theo bound, nhưng không khẳng định hypothesis sẽ có training gain.
+
+### 16.3 Controls làm certification quá khắt khe
+
+Strict-joint rate thấp khi target failure tái diễn nhưng một control sai. v5 certify bằng target failure; control accuracies và joint metric là diagnostics. Synthetic generator vẫn dùng counterfactual/invariant structure để tạo supervision có kiểm soát.
+
+### 16.4 Teacher trả invalid JSON
+
+Các lỗi gồm truncated/malformed JSON, thiếu supplied IDs, duplicate IDs và wrong schema. Giải pháp: standalone-JSON parser, correction prompt có error message, bounded retries, smaller batches, recursive split/reduce-to-singleton, atomic checkpoint và persistent response cache.
+
+### 16.5 Near-duplicate probe/data
+
+Teacher có xu hướng lặp template. Giải pháp: rotating seed subset, exact hash, token-Jaccard threshold, explicit avoid context, validation against prior generated items và non-final split roles.
+
+### 16.6 Hard quota làm acquisition thiếu tự nhiên
+
+Equal quota có thể ép chọn easy/low-value samples. v5 chỉ giữ one-pair coverage, sau đó để difficulty+novelty quyết định. Trade-off là allocation có thể quá tập trung, như 50/64 pairs vào một hypothesis ở seed 42.
+
+### 16.7 NLL một mình bỏ qua vùng phân vân; entropy một mình bỏ confidently-wrong
+
+Kết hợp 0.65 NLL + 0.35 entropy. NLL biết gold label; entropy không cần biết correct class và đo độ phẳng distribution. Hai tín hiệu bổ sung chứ không tương đương.
+
+### 16.8 Lexical diversity không phản ánh semantic redundancy
+
+Selector cũ dùng token overlap. v5 dùng contextual embedding của chính student cho novelty. Deterministic validator vẫn giữ lexical duplicate check như hàng rào leakage, còn acquisition novelty hoạt động ở representation space.
+
+### 16.9 Stopping confidence bound quá bảo thủ
+
+Với 900 paired examples, EB UCB vẫn quanh 4–5 percentage points trong run này. v5 giữ interval để diagnostic nhưng dùng predeclared practical patience rule. Đây là engineering compromise; không được mô tả practical rule như một statistical confidence guarantee.
+
+---
+
+## 17. Điều phương pháp bảo đảm và không bảo đảm
+
+### 17.1 Bảo đảm theo implementation
+
+- deterministic split membership và seeded tie-breaking;
+- verification probes không training-eligible;
+- complete-pair generation, validation và selection;
+- refuted hypothesis không xuất hiện trong v5 pool;
+- mỗi retained hypothesis có ít nhất một selected pair nếu budget đủ và pool hợp lệ;
+- final-test không tham gia adaptive acquisition/stopping;
+- final checkpoint được đánh giá một lần trên sealed HANS final set;
+- malformed artifacts, incomplete pairs, incompatible manifests và schema violations fail closed.
+
+### 17.2 Bảo đảm có điều kiện
+
+Với bounded target outcomes, appropriate conditional concentration validity và simultaneous event xác suất ít nhất \(1-\delta\), confidence-safe retention không refute hypothesis có \(\nu_h\ge\tau_v\).
+
+### 17.3 Không được tuyên bố
+
+- Không bảo đảm downstream accuracy luôn tăng.
+- Không bảo đảm unresolved hypothesis là đúng hoặc hữu ích.
+- Không bảo đảm teacher labels/QC hoàn toàn chính xác.
+- Không bảo đảm reviewer độc lập về model; generation và QC dùng cùng teacher checkpoint trong separate calls.
+- Không chứng minh causal mechanism; hypotheses là operational failure descriptions.
+- Không chứng minh entropy hoặc NLL đã calibrated.
+- Không bảo đảm contextual novelty tương ứng linguistic/mechanism diversity.
+- Không bảo đảm practical stopping là statistically optimal hoặc harm-aware.
+- Không được tuyên bố equal data access với random/uncertainty MNLI baselines; đó là cross-source baselines.
+- Không được chọn/tune thêm trên seed 42 rồi vẫn gọi seed 42 là confirmatory evidence mà không disclosure.
+
+---
+
+## 18. Pseudocode đúng implementation
 
 ```text
 INPUT:
-    starting student f0
-    unsplit HANS predictions D
-    teacher LLM
-    split fractions/seeds
-    verification delta, tau_v, K, T
-    pilot m, train/eval sizes, M
-    cost coefficient lambda
+    frozen HANS manifest M
+    base student f0
+    completed seed-42 discovery/verification artifacts
+    maximum training budget B = 128
+    verification threshold tau = 0.5
 
-1. Split stable IDs:
-       D_disc, D_ver, D_int, D_gain, D_final
-
-2. DISCOVERY
-   For each x in D_disc:
-       critic estimates e(x) without gold/correctness
-   Use gold to separate actual errors and correct controls.
-   Sample errors by e(x); select challenging correct contrasts.
-   Ask teacher for at most K falsifiable hypotheses H.
-
-3. VERIFICATION DESIGN
-   For each h in H:
-       select context from D_ver
-       generate target + counterfactual + invariant sets
-       validate labels/constraints in a separate pre-outcome call
-       reject whole set on any QC/duplicate failure
-   Freeze all accepted sets for all h.
-
-4. VERIFICATION MEASUREMENT
-   Load f0 only after all designs are frozen.
-   Query f0 once on accepted probes.
-   Z = target predeclared failure AND both controls correct.
-   For each h:
-       nu_hat = mean(Z)
-       r_v = sqrt(log(4 K T / delta) / (2 n_h))
-       certify iff nu_hat - r_v >= tau_v
-       and n_h >= min_valid_probe_sets
-
-5. SYNTHETIC GENERATION
-   For each certified h:
-       select seeds from D_int
-       generate new structured three-class NLI pairs
-       run teacher QC
-   Build local leakage signatures after generation/QC.
-   Reject complete pairs on QC/schema/label/duplicate/leakage failures.
-
-6. GAIN APPLICABILITY
-   For each certified h:
-       select D_gain records satisfying h without student outcomes.
-
-7. PILOTS
-   For each certified h:
-       construct disjoint complete-pair train batches
-       construct disjoint applicable eval batches
-       For each feasible pilot j:
-           load fresh f0
-           risk_before = 1 - HANS_accuracy(f0, eval_j)
-           train fresh LoRA on train_j
-           risk_after = 1 - HANS_accuracy(f_hj, eval_j)
-           X_hj = risk_before - risk_after
-       delta_hat_h = mean_j X_hj
-       b_h = M sqrt(2 log(2 K T / delta) / m_h)
-
-8. DECISION
-   For every certified h with valid gain and full reserve:
-       exclude pilot train IDs
-       C(h) = actual full example count
-       J_hat(h) = delta_hat_h - lambda C(h)
-       U(h) = delta_hat_h + b_h - lambda C(h)
-   If no candidate or max_h U(h) <= 0:
-       freeze STOP and exit
-   Else:
-       h* = argmax_h U(h)
-       freeze CONTINUE(h*)
-
-9. FULL INTERVENTION, CONTINUE ONLY
-   Load fresh f0.
-   Train one LoRA on non-pilot full reserve for h*.
-   Evaluate full gain on applicable D_gain.
-   Materialize D_final and evaluate f0 + full adapter.
-   Never recompute the frozen decision.
+1. Load five discovered hypotheses H.
+2. For each h in H, read adaptive target-failure outcomes:
+       nu_hat_h = mean(Z_h)
+       r_h = sqrt(log(4*K*T_eff/delta) / (2*n_h))
+       L_h = nu_hat_h - r_h
+       U_h = min(1, nu_hat_h + r_h)
+       if L_h >= tau: state_h = certified
+       else if U_h < tau: state_h = refuted
+       else: state_h = unresolved
+3. H_keep = {h : state_h in {certified, unresolved}}.
+4. For every h in H_keep:
+       generate fresh counterfactual and invariant pairs
+       run teacher QC and deterministic validation
+       reject incomplete, invalid, duplicate, or leaking pairs
+5. If accepted examples < 128:
+       generate bounded underfill rounds until >= 128 or fail at cap.
+6. Run f0 over every accepted example:
+       compute three-label probabilities
+       NLL_i = -log p_i[gold_i]
+       entropy_i = -sum_y p_i[y] log p_i[y] / log 3
+       embedding_i = L2(mean_pool(final_hidden(prompt_i)))
+7. For every complete pair j:
+       target = its base member
+       compute robust normalized target NLL
+       D_j = 0.65*NLLnorm_j + 0.35*entropy_j
+       e_j = L2((e_member1 + e_member2)/2)
+8. Coverage:
+       select highest-D pair once for every h in H_keep.
+9. Greedy fill until 64 pairs:
+       novelty(j,S) = clipped (1 - max cosine(e_j,e_k))/2
+       select argmax_j [D_j + 0.50*novelty(j,S)]
+       use seeded SHA-256 ties
+10. Freeze the 128-example ordered plan.
+11. For t = 1..4:
+       take next 32 examples
+       continue LoRA CE training from previous adapter
+       evaluate paired marginal gain on fixed 900-example stopping_eval
+       compute EB diagnostic and group gains
+       apply practical patience rule after minimum round 2
+       if stop: break
+12. Fix the last checkpoint (not the best stopping checkpoint).
+13. Evaluate once on 2,850 gain_report, 15,000 sealed HANS final,
+    MNLI matched and mismatched.
+14. Audit leakage; write result and report.
 ```
 
 ---
 
-## 16. Invariants cần giữ khi sửa code
+## 19. Cách trình bày trong paper
 
-### Data roles
+### 19.1 Method claim phù hợp
 
-- Discovery prompt chỉ dùng discovery role.
-- Verification context chỉ dùng verification role.
-- Synthetic seeds chỉ dùng intervention role.
-- Pilot/full gain chỉ dùng gain-eval role.
-- Final-test không ảnh hưởng generation, verification, ranking hoặc stopping.
-- Verification probes không bao giờ là training data.
+Có thể mô tả novelty chính như sau:
 
-### Outcome independence
+> We introduce confidence-safe hypothesis retention, which distinguishes statistically refuted failure mechanisms from those that remain unresolved, and a student-aware complete-pair acquisition rule combining gold-label difficulty, predictive entropy, and contextual representation novelty.
 
-- Verification generation/QC hoàn tất trước student predictions.
-- Không retry probe vì student không fail như mong đợi.
-- Gain applicability không nhìn student prediction/correctness.
-- \(\lambda\), budgets và confidence parameters fix trước full outcome.
-- Decision freeze trước full training.
+Không nên viết “verification proves the hypothesis” hoặc “the method never removes a good hypothesis”. Câu đúng hơn:
 
-### Interventions
+> Under the simultaneous concentration event, a hypothesis whose controlled target-failure rate exceeds the predeclared threshold is not eliminated by the UCB-based refutation rule.
 
-- Complete synthetic pairs không bị split.
-- Pilot training sets rời nhau.
-- Pilot examples bị loại khỏi full reserve.
-- Mỗi pilot và full run bắt đầu từ cùng checkpoint.
-- Pilot adapter không được promote.
-- Full run dùng cùng LoRA recipe nếu extrapolate từ pilots.
+### 19.2 Method subsections đề xuất
 
-### Validation
+1. Problem formulation and data firewall.
+2. Failure evidence discovery.
+3. Controlled target-failure verification.
+4. Confidence-safe hypothesis retention.
+5. Controlled synthetic pair generation and QC.
+6. Difficulty- and representation-aware pair acquisition.
+7. Cumulative adaptation and budget stopping.
+8. Evaluation protocol and leakage audit.
 
-- Schema violation fail fast.
-- Một member fail làm reject cả probe set hoặc synthetic pair.
-- Không sửa/đổi label sau QC.
-- Không map binary non-entailment sang three-class label tùy ý.
+### 19.3 Ablations bắt buộc để tách đóng góp
 
----
+Để chứng minh thành phần nào tạo gain, nên giữ pool/checkpoint/budget cố định và so sánh:
 
-## 17. Điều code bảo đảm và không chứng minh
+- certified-only vs certified+unresolved retention;
+- NLL-only vs entropy-only vs NLL+entropy;
+- difficulty-only vs difficulty+embedding novelty;
+- no coverage vs one-pair coverage;
+- CE vs pairwise objective trên cùng selected IDs;
+- contextual novelty vs lexical-Jaccard diversity;
+- v5 selector vs uncertainty MNLI, với disclosure cross-source data access.
 
-### Bảo đảm bằng validation/control flow
+Vì v5 hiện được phát triển trên seed 42, seed 43/44 hoặc một frozen confirmatory grid phải được chạy sau khi hyperparameters cố định. Nếu tiếp tục sửa dựa trên seed 42, paper phải gọi seed 42 là development seed.
 
-- deterministic role assignment và role disjointness;
-- manifest consistency;
-- strict teacher-response schemas;
-- pre-outcome frozen probes;
-- control-aware verification outcome;
-- minimum valid-probe requirement;
-- complete-pair preservation;
-- pilot/full train-ID separation;
-- same-checkpoint/same-recipe checks;
-- frozen decision trước full/final evaluation;
-- không reuse pilot adapter.
+### 19.4 Primary và secondary endpoints
 
-### Không tự chứng minh
+Khuyến nghị:
 
-- critic probabilities được calibrated;
-- probes là iid;
-- pilot gains là independent draws;
-- controlled failure có đúng causal mechanism được mô tả;
-- synthetic pairs chỉ thay đúng targeted mechanism;
-- concentration coverage đúng dưới dependencies do cùng LLM sinh;
-- CONTINUE bảo đảm positive realized gain;
-- STOP loại trừ mọi unseen useful intervention;
-- candidate-set-relative STOP loại trừ mọi future multi-step repair;
-- final-test được physical isolation khỏi experimenter.
+- primary: HANS final overall và non-entailment accuracy;
+- secondary: HANS per-heuristic/subcase, held-out gain report, MNLI matched/mismatched;
+- efficiency: measured GPU seconds, teacher tokens, generated/accepted items;
+- diagnostic: retention states, selected hypothesis/pair-type/label distributions, NLL/entropy/novelty summaries.
 
 ---
 
-## 18. Mismatch/risk cần kiểm tra khi viết paper
+## 20. Reproducibility, artifacts và commands
 
-1. **Adaptive bounds vẫn có assumptions.** Outer loop tồn tại, nhưng \(K\times T\)
-   union adjustment chỉ hợp lệ nếu mỗi constituent interval conditionally valid
-   theo prior history.
-2. **`exponential` thực chất là logistic weighting.** Equation và tên phải thống
-   nhất.
-3. **Independent validation dùng cùng teacher.** Có pre-outcome independence,
-   không có model independence.
-4. **Critic không calibrated.** Không nên gọi score là calibrated probability nếu
-   chưa có calibration study.
-5. **Partial pilots vẫn eligible.** Actual \(m_h<m\) vẫn được estimate nếu
-   \(m_h\ge1\).
-6. **Full size có thể nhỏ hơn requested size.** Config hiện là maximum budget.
-7. **USD cost là assumed.** Quantities measured/projected được tách rõ, nhưng rates
-   vẫn do config đặt và projection error có thể đổi decision.
-8. **UCB có thể quá lỏng.** Phải report actual radius và sensitivity.
-9. **Sealed artifact không phải OS access control.** Code không truyền final content
-   vào adaptive stages, nhưng experimenter vẫn quản lý filesystem.
-10. **Leakage detector là lexical.** Token-set Jaccard bỏ word order/multiplicity
-    và có thể bỏ sót semantic paraphrase.
-11. **Same-teacher QC có correlated-error risk.** Nên cân nhắc second model,
-    ensemble hoặc human audit.
-12. **Target/control label resolution bất đối xứng.** Target fail ở binary HANS
-    level, controls đúng ở exact MNLI level; cần ghi rõ.
+### 20.1 Chạy toàn bộ v5
 
----
-
-## 19. Cấu trúc Method gợi ý cho paper
-
-1. **Problem setup**: student, failure distribution, component intervention cost và
-   adaptive finite-horizon objective.
-2. **Data-role separation**: five-way split và no-cross-role-use protocol.
-3. **Failure discovery**: gold-blind critic, error sampling, challenging correct
-   contrasts và hypothesis schema.
-4. **Controlled verification**: target/counterfactual/invariant sets, pre-outcome
-   QC, binary \(Z\), LCB certification.
-5. **Targeted intervention construction**: structured three-class pairs, teacher
-   QC, deterministic filtering, leakage veto.
-6. **Pilot gain estimation**: fresh checkpoint, disjoint pilots, risk reduction,
-   gain UCB.
-7. **Cost-aware action selection**: \(\widehat J(h)\), \(U(h)\), argmax và STOP.
-8. **Multi-round update and held-out evaluation**: checkpoint transition, disjoint
-   gain shards và post-loop sealed final-test protocol.
-9. **Assumptions and limitations**: boundedness, independence, generated-data
-   dependence, non-causality và finite-horizon conditional scope.
-
-Ngôn ngữ nên dùng:
-
-```text
-"conditional on boundedness and sufficient independence assumptions"
-"controlled reproducibility certificate"
-"optimistic eligibility rule"
-"finite-horizon, candidate-set-relative stopping decision"
+```bash
+conda activate active_lr
+cd /home/llm/hainn/hainn/active_learning
+POOL_CUDA_DEVICE=0 RUN_CUDA_DEVICE=1 ./run_ours_verified_v5.sh
 ```
 
-Không nên claim khi chưa có bằng chứng bổ sung:
+Hai GPU được dùng cho hai stage tuần tự. Để chỉ build pool:
 
-```text
-"causally verified failure mechanism"
-"guaranteed beneficial intervention"
-"globally safe stopping"
-"independent validation" nếu hiểu là independent model
-"unconditional adaptive confidence guarantee"
+```bash
+POOL_CUDA_DEVICE=0 ./run_ours_verified_v5.sh --pool-only
 ```
 
----
+Sau khi pool đã có `.complete`, chạy benchmark/report:
 
-## 20. Checklist trước research run
+```bash
+RUN_CUDA_DEVICE=1 ./run_ours_verified_v5.sh --skip-pool
+```
 
-### Trước discovery
+Chỉ tạo lại report từ completed result:
 
-- [ ] Student checkpoint/adapter đã freeze.
-- [ ] Source predictions chưa có `split_role`.
-- [ ] Teacher path và exact model revision được lưu.
-- [ ] Split fractions/seeds và run seed đã freeze.
-- [ ] Không tune theo final-test subgroup.
+```bash
+./run_ours_verified_v5.sh --report-only
+```
 
-### Trước verification
+Script từ chối overwrite completed run. Incomplete run directory được move vào `logs/.../partial_runs` trước khi chạy lại benchmark.
 
-- [ ] Candidate count không vượt \(K\).
-- [ ] \(\delta,\tau_v,K,T\), probe count và minimum valid count pre-register.
-- [ ] Generator/validator identity được mô tả đúng.
-- [ ] Giữ one-shot/pre-outcome probe policy.
+### 20.2 Artifacts chính
 
-### Trước synthetic generation
+| Artifact | Path |
+|---|---|
+| Reused hypotheses | `outputs/stage2_acquisition_ours_verified_v2/seed_42/hypotheses.json` |
+| Reused verification result | `outputs/stage2_acquisition_ours_verified_v2/seed_42/verification/results.json` |
+| v5 accepted pool | `outputs/stage2_acquisition_ours_verified_v5/seed_42/synthetic/accepted.jsonl` |
+| v5 pool provenance | `outputs/stage2_acquisition_ours_verified_v5/seed_42/synthetic/manifest.json` |
+| v5 benchmark result | `outputs/stage2_runs_ours_verified_v5_ce/experiment_b/ours_verified/budget_128/seed_42/result.json` |
+| Round/stopping trace | `outputs/stage2_runs_ours_verified_v5_ce/experiment_b/ours_verified/budget_128/seed_42/rounds.jsonl` |
+| Final report | `reports/stage2_ours_verified_v5_ce/seed_42_budget_128/STAGE2_REPORT.md` |
+| Logs | `logs/stage2_ours_verified_v5_ce/seed_42_budget_128/` |
 
-- [ ] Chỉ certified hypotheses được dùng.
-- [ ] Training labels là exact three-class MNLI.
-- [ ] Pair counts đủ cho pilots plus full reserve sau expected rejection.
-- [ ] QC model/human audit policy đã freeze.
-
-### Trước pilots
-
-- [ ] \(m\), train/eval sizes, \(M,\delta,K,T\) đã freeze.
-- [ ] Chính sách cho phép/cấm partial pilots đã pre-register.
-- [ ] Checkpoint descriptor và LoRA recipe đã freeze.
-- [ ] Applicability selection không nhìn student outcomes.
-
-### Trước decision
-
-- [ ] \(\lambda\) và cost definition đã freeze.
-- [ ] Xác định full size là exact hay maximum.
-- [ ] Kiểm tra numeric UCB không vacuous.
-- [ ] Pilot IDs bị loại khỏi full reserve.
-- [ ] Không tune rule từ full/final outcomes.
-
-### Sau decision
-
-- [ ] STOP không trigger training.
-- [ ] CONTINUE chỉ train một fresh full intervention.
-- [ ] Không reuse pilot adapter.
-- [ ] Final-test chỉ dùng sau frozen decision/training.
-- [ ] Báo cáo negative gains, shortages và rejected counts.
-- [ ] Giữ đầy đủ teacher call/response audit trail.
+Persistent teacher response cache và per-hypothesis generation/QC checkpoints cho phép resume mà không lặp các call đã hoàn tất. Atomic final writes và `.complete` marker ngăn downstream benchmark đọc pool dang dở.
 
 ---
 
-## 21. Offline theory validation không thuộc online flow
+## 21. Source-code map
 
-`scripts/run_theory_validation.py` là oracle-debug, evaluation-only. Nó dùng một
-separate disjoint reference dataset để đánh giá verification behavior, empirical
-gain-UCB coverage và audit một online STOP decision.
+| Chức năng | File |
+|---|---|
+| v5 entry point | `run_ours_verified_v5.sh` |
+| v5 generation config | `configs/stage2_generation_ours_confidence_safe.yaml` |
+| v5 benchmark config | `configs/stage2_benchmark_ours_verified_v5.yaml` |
+| Discovery config | `configs/stage2_ours_verified_v2_discovery.yaml` |
+| Verification config | `configs/stage2_ours_verified_v2_verification.yaml` |
+| Hypothesis generation/sampling | `src/hypotheses/llm_generator.py` |
+| Critic error scoring | `src/hypotheses/error_scorer.py` |
+| Probe generation/QC | `src/verification/generated_probes.py` |
+| Hoeffding calculation | `src/verification/bounds.py` |
+| Synthetic orchestration/retention | `scripts/generate_synthetic_interventions.py` |
+| Synthetic generation | `src/synthetic/generator.py` |
+| Synthetic QC/leakage | `src/synthetic/validator.py` |
+| Synthetic schema | `src/synthetic/types.py` |
+| Student scoring/embeddings | `src/models/qwen_nli.py` |
+| Pair selector | `src/benchmark/selection.py` |
+| Stopping subset | `src/benchmark/stopping_subset.py` |
+| Benchmark/training/stopping/eval | `scripts/run_stage2_benchmark.py` |
+| Suite grid | `scripts/run_stage2_suite.py` |
+| Reporting | `scripts/report_stage2_benchmark.py` |
 
-Safe-stop audit chỉ xét robustly valid hypotheses trong candidate set đã biết:
+---
+
+## 22. Audit checklist trước khi dùng số liệu trong paper
+
+- [ ] Config snapshot trong run directory khớp v5 config hash/content.
+- [ ] Frozen HANS manifest hash đúng giá trị đã khai báo.
+- [ ] Verification metric là `target_failure`, controls là diagnostic-only.
+- [ ] Với protocol v6, `probe_design=target_only`, `probes_per_set=1`, và
+  strict-joint/control diagnostics phải là `not_available` thay vì giá trị 0.
+- [ ] Retained set bằng certified cộng unresolved; refuted set bị loại.
+- [ ] `accepted.jsonl` chỉ chứa complete pairs và ít nhất 128 examples.
+- [ ] Selector strategy là `confidence_safe_entropy_novelty_v1`.
+- [ ] Selected budget chẵn và mọi selected pair có đủ hai members.
+- [ ] Training objective ghi `per_example_causal_lm_cross_entropy`.
+- [ ] Stopping chỉ đọc 900 `stopping_eval`, không đọc `gain_report`/final-test.
+- [ ] Final-test evaluations bằng một cho final checkpoint.
+- [ ] Leakage audit pass và không dùng audit để thay training/selection.
+- [ ] Report rõ seed 42 là development evidence nếu đã tune trên seed này.
+- [ ] So sánh với MNLI baselines không claim equal data access.
+- [ ] Mọi cost đều kèm rates/assumptions và raw resource usage.
+
+---
+
+## 23. Ghi chú diễn giải kết quả hiện tại
+
+v5 đã đạt mục tiêu kỹ thuật là không loại `Contextual Invalidation` chỉ vì LCB chưa vượt threshold, tạo đủ fresh candidates, chọn 128 examples không shortage và hoàn tất benchmark không leakage. Tuy nhiên selector cuối cùng chỉ cấp một pair cho unresolved hypothesis và tập trung 50/64 pairs vào `Conditional Statement`. Vì vậy run này chứng minh retention/coverage machinery hoạt động, nhưng chưa chứng minh unresolved hypothesis đóng góp đáng kể cho gain.
+
+---
+
+## 24. Protocol v6 closed loop và target-only verification
+
+Protocol v6 thay thế flow one-shot của v5 bằng tối đa bốn vòng, mỗi vòng train
+32 examples và tổng budget tối đa vẫn là 128. Sau mỗi checkpoint, discovery set
+được chấm lại; tối đa hai mechanism mới được đề xuất khi tổng candidate active
+nhỏ hơn năm. Candidate mới được deduplicate với archive; một mechanism đã
+resolved được tái kích hoạt nếu discovery phát hiện cùng lỗi quay trở lại.
+
+Verification v6 dùng `probe_design: target_only`. Mỗi probe set chỉ chứa một
+target premise-hypothesis pair với exact three-class gold label và một
+predeclared wrong binary HANS label. Counterfactual và invariant controls không
+được sinh ở verification stage; chúng chỉ được sinh sau verification dưới dạng
+complete training pairs. Vì vậy biến kiểm định là
 
 \[
-\max_h\left(\Delta_h^{reference}-\lambda C(h)\right)\le0.
+Z_{h,i}=\mathbf 1\{\widehat y_{h,i}^{\mathrm{HANS}}
+=y_h^{\mathrm{wrong,predeclared}}\},
 \]
 
-Passing audit không loại trừ unseen/future hypotheses, hypothesis interactions
-hoặc multi-step interventions. Nó hỗ trợ assumptions về mặt thực nghiệm, không
-chứng minh theorem và không phải online main step.
+trong khi strict-joint statistic và control accuracies được ghi rõ là
+`not_available`. Quy tắc trạng thái không đổi: certify nếu
+\(LCB_h\ge\tau_v\), refute/resolve nếu \(UCB_h<\tau_v\), và giữ lại nếu khoảng
+tin cậy còn cắt threshold. Probe verification luôn có
+`training_eligible=false`.
 
----
+Với retained hypotheses, generator tạo counterfactual/invariant synthetic
+training pairs riêng. Student hiện tại chấm toàn bộ eligible pool. Với target
+member của pair \(j\):
 
-## 22. Source-code map
+\[
+D_j=0.65R_{\mathrm{NLL}}(j)+0.35R_{H}(j),
+\]
 
-| Thành phần | File |
-|---|---|
-| Student prompt/candidate scoring | [`src/models/qwen_nli.py`](src/models/qwen_nli.py) |
-| LoRA objective/training | [`src/models/lora_training.py`](src/models/lora_training.py) |
-| Five-way split | [`src/data/hans_split.py`](src/data/hans_split.py) |
-| Split/manifest guards | [`src/data/pipeline_split.py`](src/data/pipeline_split.py) |
-| Critic scoring | [`src/hypotheses/error_scorer.py`](src/hypotheses/error_scorer.py) |
-| Discovery sampling/prompt | [`src/hypotheses/llm_generator.py`](src/hypotheses/llm_generator.py) |
-| Hypothesis schema | [`src/hypotheses/types.py`](src/hypotheses/types.py) |
-| Teacher request/provider | [`src/teacher/base.py`](src/teacher/base.py) |
-| Probe generation/QC/outcomes | [`src/verification/generated_probes.py`](src/verification/generated_probes.py) |
-| Verification LCB | [`src/verification/bounds.py`](src/verification/bounds.py) |
-| Gain applicability | [`src/verification/llm_operationalizer.py`](src/verification/llm_operationalizer.py) |
-| Synthetic generation | [`src/synthetic/generator.py`](src/synthetic/generator.py) |
-| Synthetic schema | [`src/synthetic/types.py`](src/synthetic/types.py) |
-| Synthetic QC/leakage | [`src/synthetic/validator.py`](src/synthetic/validator.py) |
-| Pilot/full interventions | [`src/intervention/synthetic.py`](src/intervention/synthetic.py) |
-| Gain estimate/UCB | [`src/gain/estimation.py`](src/gain/estimation.py) |
-| Cost-aware stopping | [`src/decision/cost_aware.py`](src/decision/cost_aware.py) |
-| Full orchestration/final test | [`scripts/run_main_decision.py`](scripts/run_main_decision.py) |
+trong đó \(R\) là tie-aware percentile rank theo vòng. Greedy score là
 
-Khi code thay đổi, phải cập nhật đồng thời formula, config defaults, role
-permissions, prompt schemas, artifact schemas và research claims trong tài liệu
-này.
+\[
+S_j=D_j+0.50R_{\mathrm{novelty}}(j)
++0.35(\sqrt{m_h+1}-\sqrt{m_h})
++\frac{0.50}{1+m_h}.
+\]
 
+Hai số hạng cuối là soft diminishing-return và new/under-trained hypothesis
+bonus. Không có hard per-hypothesis quota. Sau vòng cuối, một fresh target-only
+audit được chạy trước khi mở gain report và sealed final test.
 
+Stopping accuracy tăng từ 0.6322 lên đỉnh 0.6456 ở round 3 rồi giảm nhẹ xuống 0.6444 ở round 4; protocol vẫn dùng round 4 vì checkpoint selection là last checkpoint và patience chưa hết. Đây là hành vi đúng theo predeclared flow, đồng thời chỉ ra hai hướng ablation tương lai: harm-aware stopping và best-checkpoint selection phải được thiết kế/freeze trước khi chạy confirmatory seeds, không được chọn hậu nghiệm trên final-test.
 
+Tóm lại, claim mạnh và chính xác nhất của flow mới là: **confidence-safe retention bảo vệ plausible hypotheses khỏi bị loại chỉ vì thiếu power, còn entropy-NLL-contextual-novelty acquisition chọn complete synthetic pairs theo trạng thái thực của student thay vì hard-coded allocation**. Hiệu quả downstream phải được xác nhận bằng multi-seed controlled ablations.
 
+### 24.1. Preserved seed-42 diagnostic run
+
+Run v6 seed 42, configured budget 128, hoàn tất ngày 2026-10-19 được giữ lại
+vĩnh viễn như một diagnostic artifact; không được xóa hoặc thay thế âm thầm.
+Observed HANS final accuracy là `0.638533`, nhưng row này không phải một
+fixed-budget comparison hợp lệ cho intended cumulative v6. Post-run audit cho
+thấy round-4 adapter không giữ được expected cumulative LoRA updates từ ba
+round trước. Vì vậy observed accuracy phải luôn đi kèm nhãn
+`preserved diagnostic / not fixed-budget comparable`.
+
+Điều này không làm mất giá trị của lifecycle trace: protocol đã refute
+Subject-Object Reversal, mở candidate slot, discover Extra Context Entailment
+Failure và phân bổ selected pairs cân bằng hơn v5. Checkpoint, checksum và ghi
+chú diễn giải được lưu tại
+`outputs/preserved_checkpoints/ours_verified_v6_closed_loop/seed_42_budget_128_diagnostic_20261019`;
+bảng so sánh có v6 nằm tại
+`reports/stage2_seed42_comparison_with_v6/STAGE2_COMPARISON.md`.

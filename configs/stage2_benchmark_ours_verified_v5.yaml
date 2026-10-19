@@ -1,0 +1,24 @@
+extends: stage2_benchmark_ours_verified_v4.yaml
+
+stage2_benchmark:
+  synthetic_artifacts:
+    ours_verified:
+      accepted: outputs/stage2_acquisition_ours_verified_v5/seed_{seed}/synthetic/accepted.jsonl
+      provenance: outputs/stage2_acquisition_ours_verified_v5/seed_{seed}/synthetic/manifest.json
+      teacher_calls_dir: outputs/stage2_acquisition_ours_verified_v5/seed_{seed}/teacher_calls
+
+  ours_selection:
+    strategy: confidence_safe_entropy_novelty_v1
+    verification_probes: outputs/stage2_acquisition_ours_verified_v5/seed_{seed}/verification/probes.jsonl
+    verification_outcomes: outputs/stage2_acquisition_ours_verified_v5/seed_{seed}/verification/probe_set_outcomes.jsonl
+
+    # Difficulty is measured on the failure-targeting base member. Gold NLL
+    # protects confidently-wrong examples; entropy adds decision-boundary data.
+    nll_weight: 0.65
+    entropy_weight: 0.35
+
+    # Contextual student embeddings drive greedy non-redundant pair selection.
+    novelty_weight: 0.50
+    embedding_batch_size: 8
+    nll_quantile_low: 0.10
+    nll_quantile_high: 0.90

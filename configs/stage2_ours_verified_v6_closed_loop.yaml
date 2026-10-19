@@ -1,0 +1,128 @@
+extends: stage2_benchmark_ours_verified_v5.yaml
+
+# Protocol v6 keeps the final training budget identical to the Stage-2
+# baselines, but refreshes discovery and verification after each checkpoint.
+mode: llm_main
+oracle_debug: false
+stage2_policy: failure_targeted_verified
+verification_retention_policy: confidence_safe
+
+# The Stage-2 benchmark parents define the student but not the teacher because
+# earlier benchmark runs reused prebuilt pools. Closed-loop refreshes invoke the
+# teacher directly, so v6 must declare it in the resolved run config.
+teacher:
+  provider: huggingface
+  name_or_path: Qwen/Qwen3-14B
+  device_map: auto
+  dtype: bfloat16
+  trust_remote_code: false
+  local_files_only: false
+  max_input_tokens: 8192
+  max_new_tokens: 4096
+
+model:
+  batch_size: 16
+
+hypothesis_generation:
+  # Propose only one or two new mechanisms at each checkpoint refresh. The
+  # archive deduplicator may accept fewer when they repeat historical failures.
+  max_hypotheses: 2
+  min_hypotheses: 1
+  max_error_examples: 80
+  max_contrast_examples: 20
+  sampling_strategy: exponential
+  sampling_alpha: 0.5
+  sampling_beta: 10.0
+  sampling_threshold: 0.7
+  contrast_sampling_strategy: highest_error_score
+  diversity_sampling: true
+  max_candidate_token_jaccard: 0.78
+  max_attempts_per_call: 5
+  seed: 42
+  prompt_version: failure_discovery_v3
+  # Re-discovery still uses observed discovery errors, but avoids a 94-call
+  # teacher critic pass merely to rank those records. This scorer sees no gold.
+  error_scorer:
+    type: uniform_gold_blind
+    source: uniform_gold_blind_closed_loop_v1
+    score: 0.5
+    seed: 42
+
+verification:
+  certification_metric: target_failure
+  # Verification produces only the failure-targeting member. Counterfactual
+  # and invariant pairs are generated later for training, not certification.
+  probe_design: target_only
+  delta: 0.05
+  tau_v: 0.5
+  n_probe_sets: 30
+  min_valid_probe_sets: 20
+  # Never verify more than five active/novel mechanisms in one refresh.
+  max_hypotheses_per_round: 5
+  # Five checkpoint-conditioned verification families are predeclared:
+  # refreshes before rounds 2-4 plus the final post-training audit, with room
+  # for the initial family. Each family has two predeclared adaptive looks.
+  max_rounds: 5
+  max_context_records: 24
+  max_probe_sets_per_call: 4
+  max_attempts_per_batch: 5
+  near_duplicate_threshold: 0.92
+  validation_max_probe_sets_per_call: 8
+  validation_max_attempts_per_batch: 5
+  seed: 42
+  label_validation_seed: 314159
+  probe_prompt_version: target_only_verification_probes_v1
+  label_validation_prompt_version: verification_probe_validation_v1
+  adaptive_verification:
+    enabled: true
+    initial_probe_sets: 20
+    increment_probe_sets: 10
+
+# Each refresh produces a 48-pair reserve shared across all retained
+# hypotheses. Probe examples are never copied into this training reserve.
+synthetic_generation:
+  counterfactual_pairs_per_hypothesis: 24
+  invariant_pairs_per_hypothesis: 24
+  reasoning_contrast_pairs_per_hypothesis: 0
+  max_seed_examples: 24
+  seed_examples_per_call: 4
+  max_pairs_per_call: 4
+  max_attempts_per_batch: 5
+  seed: 42
+  prompt_version: targeted_synthetic_nli_pairs_v3
+
+synthetic_validation:
+  near_duplicate_threshold: 0.92
+  min_sentence_tokens: 3
+  max_sentence_tokens: 80
+  max_examples_per_call: 24
+  max_attempts_per_batch: 5
+  seed: 42
+  prompt_version: synthetic_pair_quality_control_v2
+
+stage2_generation_limit_examples: 96
+stage2_min_accepted_examples: 32
+stage2_max_generated_examples: 384
+
+closed_loop:
+  seed: 42
+  total_budget: 128
+  max_rounds: 4
+  per_round_examples: 32
+  max_hypotheses_per_round: 5
+  hypothesis_near_duplicate_threshold: 0.78
+  pool_near_duplicate_threshold: 0.92
+  final_hypothesis_audit: true
+  initial_pool_dir: outputs/stage2_acquisition_ours_verified_v5/seed_42
+  shared_predictions_path: outputs/stage2_shared/predictions.jsonl
+  stopping_subset_manifest: outputs/stage2_shared/gain_eval_stopping_subset_v1.json
+  selection:
+    nll_weight: 0.65
+    entropy_weight: 0.35
+    novelty_weight: 0.50
+    hypothesis_bonus_weight: 0.35
+    # B_new(h) = lambda_new / (1 + m_h), where m_h is the cumulative
+    # number of selected pairs. This encourages a newly retained mechanism to
+    # receive evidence without imposing a hard per-hypothesis quota.
+    new_hypothesis_bonus_weight: 0.50
+    embedding_batch_size: 8
