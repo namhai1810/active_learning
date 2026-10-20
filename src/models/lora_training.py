@@ -105,6 +105,96 @@ class PairedTrainingResult:
     counterfactual_pairs: int
     invariant_pairs: int
     reasoning_contrast_pairs: int
+    optimizer_state_loaded: bool = False
+    optimizer_step_start: int = 0
+    optimizer_step_end: int = 0
+
+
+def _optimizer_step(optimizer: Any) -> int:
+    """Return the common AdamW step, rejecting internally inconsistent state."""
+    steps: set[int] = set()
+    for state in optimizer.state.values():
+        value = state.get("step")
+        if value is None:
+            continue
+        if hasattr(value, "item"):
+            value = value.item()
+        steps.add(int(value))
+    if len(steps) > 1:
+        raise RuntimeError(f"Optimizer parameters disagree on AdamW step: {steps}")
+    return next(iter(steps), 0)
+
+
+def _cpu_tree(value: Any) -> Any:
+    """Detach tensor leaves to CPU so optimizer checkpoints are portable."""
+    if hasattr(value, "detach") and hasattr(value, "cpu"):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: _cpu_tree(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_cpu_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_cpu_tree(item) for item in value)
+    return value
+
+
+def _load_optimizer_checkpoint(
+    optimizer: Any,
+    path: str | Path,
+    parameter_names: list[str],
+) -> int:
+    """Load a named AdamW checkpoint and return its completed step count."""
+    import torch
+
+    checkpoint_path = Path(path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Optimizer checkpoint is missing: {checkpoint_path}")
+    try:
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except TypeError:  # pragma: no cover - compatibility with older torch
+        payload = torch.load(checkpoint_path, map_location="cpu")
+    if not isinstance(payload, dict) or payload.get("format_version") != "named_adamw_v1":
+        raise ValueError("Unsupported optimizer checkpoint format")
+    saved_names = payload.get("parameter_names")
+    if saved_names != parameter_names:
+        raise ValueError(
+            "Optimizer checkpoint parameter order differs from the loaded adapter"
+        )
+    state_dict = payload.get("optimizer_state_dict")
+    if not isinstance(state_dict, dict):
+        raise ValueError("Optimizer checkpoint has no optimizer_state_dict")
+    optimizer.load_state_dict(state_dict)
+    loaded_step = _optimizer_step(optimizer)
+    declared_step = int(payload.get("optimizer_step", -1))
+    if loaded_step != declared_step:
+        raise ValueError(
+            "Optimizer checkpoint step metadata does not match its tensor state"
+        )
+    return loaded_step
+
+
+def _save_optimizer_checkpoint(
+    optimizer: Any,
+    path: str | Path,
+    parameter_names: list[str],
+) -> int:
+    """Atomically save named AdamW state and return its completed step count."""
+    import os
+    import torch
+
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    completed_step = _optimizer_step(optimizer)
+    payload = {
+        "format_version": "named_adamw_v1",
+        "parameter_names": parameter_names,
+        "optimizer_step": completed_step,
+        "optimizer_state_dict": _cpu_tree(optimizer.state_dict()),
+    }
+    temporary = output_path.with_name(output_path.name + ".tmp")
+    torch.save(payload, temporary)
+    os.replace(temporary, output_path)
+    return completed_step
 
 
 def pairwise_distribution_losses(
@@ -178,6 +268,8 @@ def _train_lora(
     *,
     pair_types: list[str] | None = None,
     pairwise_config: PairwiseLossConfig | None = None,
+    optimizer_state_input: str | Path | None = None,
+    optimizer_state_output: str | Path | None = None,
 ) -> PairedTrainingResult:
     """Fine-tune only LoRA parameters and save the resulting adapter."""
     if not examples:
@@ -216,9 +308,13 @@ def _train_lora(
         if parameter.requires_grad and parameter.dtype != torch.float32:
             parameter.data = parameter.data.float()
 
-    trainable_parameters = [
-        parameter for parameter in student.model.parameters() if parameter.requires_grad
+    named_trainable_parameters = [
+        (name, parameter)
+        for name, parameter in student.model.named_parameters()
+        if parameter.requires_grad
     ]
+    trainable_parameters = [parameter for _, parameter in named_trainable_parameters]
+    trainable_parameter_names = [name for name, _ in named_trainable_parameters]
     if not trainable_parameters:
         raise RuntimeError("The model has no trainable LoRA parameters")
 
@@ -307,6 +403,16 @@ def _train_lora(
         trainable_parameters,
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
+    )
+    optimizer_state_loaded = optimizer_state_input is not None
+    optimizer_step_start = (
+        _load_optimizer_checkpoint(
+            optimizer,
+            optimizer_state_input,
+            trainable_parameter_names,
+        )
+        if optimizer_state_input is not None
+        else 0
     )
     label_first_token_ids: list[int] | None = None
     if paired:
@@ -497,6 +603,15 @@ def _train_lora(
     output_path = Path(adapter_output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     student.model.save_pretrained(output_path)
+    optimizer_step_end = _optimizer_step(optimizer)
+    if optimizer_state_output is not None:
+        saved_step = _save_optimizer_checkpoint(
+            optimizer,
+            optimizer_state_output,
+            trainable_parameter_names,
+        )
+        if saved_step != optimizer_step_end:
+            raise RuntimeError("Saved optimizer step differs from in-memory state")
     return PairedTrainingResult(
         total_loss=total_loss / loss_count,
         token_cross_entropy_loss=token_loss_total / loss_count,
@@ -519,6 +634,9 @@ def _train_lora(
         reasoning_contrast_pairs=(
             pair_types.count("reasoning_contrast") if pair_types is not None else 0
         ),
+        optimizer_state_loaded=optimizer_state_loaded,
+        optimizer_step_start=optimizer_step_start,
+        optimizer_step_end=optimizer_step_end,
     )
 
 
@@ -533,6 +651,28 @@ def train_lora(
     return _train_lora(
         student, examples, config, adapter_output_dir, seed
     ).total_loss
+
+
+def train_lora_stateful(
+    student: QwenNLIStudent,
+    examples: list[MNLIExample],
+    config: LoraTrainingConfig,
+    adapter_output_dir: str | Path,
+    seed: int,
+    *,
+    optimizer_state_input: str | Path | None,
+    optimizer_state_output: str | Path,
+) -> PairedTrainingResult:
+    """Train CE LoRA while carrying AdamW state across closed-loop rounds."""
+    return _train_lora(
+        student,
+        examples,
+        config,
+        adapter_output_dir,
+        seed,
+        optimizer_state_input=optimizer_state_input,
+        optimizer_state_output=optimizer_state_output,
+    )
 
 
 def train_paired_lora(

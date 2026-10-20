@@ -1194,3 +1194,224 @@ chú diễn giải được lưu tại
 `outputs/preserved_checkpoints/ours_verified_v6_closed_loop/seed_42_budget_128_diagnostic_20261019`;
 bảng so sánh có v6 nằm tại
 `reports/stage2_seed42_comparison_with_v6/STAGE2_COMPARISON.md`.
+
+---
+
+## 25. Protocol v7: một closed loop, hai training branches công bằng
+
+v7 giữ nguyên discovery, target-only verification, confidence-safe retention,
+synthetic QC và selector của v6. Thay đổi duy nhất có chủ đích là sửa tính liên
+tục của training và tạo một đối chứng one-pass trên **chính xác cùng acquisition
+trace**. Closed loop chỉ chạy một lần; do đó hai branch có cùng hypothesis
+archive, verification probes, generated pool, thứ tự vòng và tập 128 selected
+example IDs.
+
+### 25.1 Stateful continuation branch (cách 1)
+
+Gọi \(A_r\) là LoRA weights và \(O_r\) là toàn bộ AdamW state sau vòng \(r\),
+bao gồm first/second moments và step counter. Vòng kế tiếp bắt đầu từ
+
+\[
+(A_{r-1},O_{r-1})
+\xrightarrow{\;32\text{ fresh selected examples}\;}
+(A_r,O_r).
+\]
+
+Với batch size 4, gradient accumulation 8 và một epoch, mỗi vòng có 8
+microbatches và đúng một optimizer step. Vì vậy audit bắt buộc là
+
+\[
+O_0.step=0,\quad O_1.step=1,\quad O_2.step=2,\quad
+O_3.step=3,\quad O_4.step=4.
+\]
+
+Trước mỗi vòng \(r>1\), serialized parent adapter được so tensor-by-tensor với
+adapter vừa load trong memory. Tên tensor PEFT được canonicalize để
+`.default.` không tạo false mismatch; shape/key set phải trùng và sai khác trị
+tuyệt đối tối đa chỉ được nằm trong tolerance cho dtype casting. Sau training,
+adapter vừa save được kiểm tra lại theo cùng quy tắc. AdamW checkpoint còn lưu
+ordered trainable-parameter names; bất kỳ thay đổi parameter order nào đều làm
+run fail. Do đó lỗi silent reinitialization của v6 không thể tiếp tục tạo một
+artifact có vẻ hoàn tất: v7 sẽ fail-fast ở đúng vòng mất continuity.
+
+### 25.2 Fresh consolidation branch (cách 3)
+
+Sau khi closed loop kết thúc và selected IDs đã frozen, v7 load lại checkpoint
+gốc, khởi tạo một LoRA mới với seed 42 và train đúng một epoch trên hợp của bốn
+batch acquisition:
+
+\[
+\mathcal D_{128}=\mathcal B_1\cup\mathcal B_2\cup
+\mathcal B_3\cup\mathcal B_4,
+\qquad
+A_{\mathrm{base}}\xrightarrow{\;\mathcal D_{128}\;}A_{\mathrm{consolidated}}.
+\]
+
+128 examples tạo 32 microbatches và đúng 4 AdamW steps. Branch này không điều
+khiển discovery/verification; nó chỉ trả lời câu hỏi sạch: *nếu training recipe
+one-pass của các baseline cũ được giữ nguyên, tập 128 examples do closed-loop
+acquisition chọn có tốt hơn hay không?* Vì vậy consolidation là primary row để
+so sánh acquisition với các one-pass baseline cũ. Continuation là secondary row
+để đo giá trị của online continual optimization.
+
+Hai branch có cùng số unique training examples (128), cùng một lần exposure mỗi
+example, cùng objective CE, cùng LR, cùng effective batch size và cùng tổng bốn
+optimizer steps. Chúng khác nhau có chủ đích ở data ordering/schedule: continuation
+chia bốn online segments và giữ AdamW moments, còn consolidation shuffle/train
+một lần trên toàn bộ frozen set. Verification probes vẫn luôn
+`training_eligible=false`.
+
+### 25.3 v7 artifacts và command
+
+```bash
+conda activate active_lr
+cd /home/llm/hainn/hainn/active_learning
+TEACHER_GPU=1 STUDENT_GPU=0 ./run_ours_verified_v7_dual_closed_loop.sh
+```
+
+| Artifact | Path |
+|---|---|
+| Shared acquisition trace | `outputs/stage2_runs_ours_verified_v7_dual/experiment_b/ours_verified/budget_128/seed_42/rounds.jsonl` |
+| Frozen selected examples | `outputs/stage2_runs_ours_verified_v7_dual/experiment_b/ours_verified/budget_128/seed_42/selected_training_examples.jsonl` |
+| Continuation result | `outputs/stage2_runs_ours_verified_v7_dual/experiment_b/ours_verified/budget_128/seed_42/branches/continuation/result.json` |
+| Consolidation result | `outputs/stage2_runs_ours_verified_v7_dual/experiment_b/ours_verified/budget_128/seed_42/branches/consolidation/result.json` |
+| Direct branch report | `outputs/stage2_runs_ours_verified_v7_dual/experiment_b/ours_verified/budget_128/seed_42/V7_COMPARISON.md` |
+| Full seed-42 table | `reports/stage2_seed42_comparison_with_v7/STAGE2_COMPARISON.md` |
+
+### 25.4 Change log v6 → v7
+
+| Thành phần | v6 diagnostic | v7 hiện tại |
+|---|---|---|
+| Closed-loop controller | Round adapter được truyền theo path nhưng completed artifact không giữ được expected cumulative updates | Round \(r+1\) bắt buộc load adapter của round \(r\), có tensor-level audit trước khi train |
+| Optimizer | AdamW được tạo lại mỗi lần gọi training; không có persisted moments/step audit | Lưu và load toàn bộ AdamW state, ordered parameter names và step counter |
+| Continuity failure | Có thể chỉ phát hiện sau khi run kết thúc | Fail-fast nếu adapter, parameter order hoặc optimizer step không khớp |
+| Online training | Intended cumulative nhưng artifact seed 42 không chứng minh được continuity | 32 fresh examples/round, một optimizer step/round, state chain `0→1→2→3→4` |
+| Final comparison | Chỉ có final online checkpoint, không comparable với one-pass baseline do continuity failure | Hai branch trên cùng selected IDs: continuation và fresh one-pass consolidation |
+| Acquisition cost | Một closed loop | Vẫn chỉ một closed loop; không lặp teacher generation cho branch thứ hai |
+| Primary comparison | Không dùng v6 để xếp hạng | Consolidation là primary apples-to-apples row; continuation là secondary online-training row |
+| v6 artifact | Preserved diagnostic | Vẫn được giữ nguyên, không overwrite hoặc xóa khỏi bảng lịch sử |
+
+Những thành phần **không thay đổi** từ v6 gồm: checkpoint-conditioned
+discovery, tối đa 1–2 novel hypotheses mỗi refresh, target-only verification,
+adaptive Hoeffding certification, confidence-safe retention, synthetic
+generation/QC, NLL–entropy difficulty, contextual embedding novelty và soft
+diminishing-return selector. Vì vậy v7 cô lập thay đổi training/checkpoint
+continuity thay vì đồng thời thay thuật toán acquisition.
+
+### 25.5 Completed run ledger: seed 42, budget 128
+
+Run được launch lúc `2026-10-19 22:52 CEST` bằng GPU mapping
+teacher=`physical GPU 1`, student=`physical GPU 0`, sau đó hoàn tất thành công
+vào ngày `2026-10-20`. Marker `.complete`, `comparison.json`, hai branch result
+và các báo cáo đều đã được tạo.
+
+Kết quả lifecycle và continuity:
+
+| Round | Fresh examples | Cumulative examples | AdamW transition | Parent adapter matched | Saved adapter matched | Stopping accuracy | Stopping non-entailment |
+|---:|---:|---:|---:|---|---|---:|---:|
+| 1 | 32 | 32 | `0 → 1` | N/A | yes | 0.636667 | 0.331111 |
+| 2 | 32 | 64 | `1 → 2` | yes | yes | 0.638889 | 0.340000 |
+| 3 | 32 | 96 | `2 → 3` | yes | yes | 0.638889 | 0.340000 |
+| 4 | 32 | 128 | `3 → 4` | yes | yes | 0.641111 | 0.344444 |
+
+Ở cả bốn vòng, adapter save audit kiểm tra đủ `392/392` tensors, không có
+missing key, extra key hoặc shape mismatch; maximum absolute difference bằng
+`0.0`. Round 2--4 đều load đúng parent adapter và đúng AdamW state từ vòng
+trước. Vì vậy v7 đã chứng minh được chuỗi stateful continuation
+
+\[
+(A_0,O_0)\rightarrow(A_1,O_1)\rightarrow(A_2,O_2)
+\rightarrow(A_3,O_3)\rightarrow(A_4,O_4)
+\]
+
+thay vì chỉ truyền một adapter path trên danh nghĩa như artifact v6.
+
+Closed loop hoàn tất `4/4` rounds và dùng đủ `128/128` examples. Stop reason là
+`maximum_budget_reached_with_remaining_hypotheses`: run dừng vì đã dùng hết
+budget, không phải vì mọi hypothesis đã được giải quyết. Trong refresh trước
+round 4, hệ thống phát hiện một novel hypothesis
+`llm_cb3f3dbe6e3a4fb9`, verify nó ở trạng thái unresolved và vẫn cấp một pair
+exploration nhờ soft diminishing-return selector. Final audit còn hai
+hypotheses certified và ba hypotheses unresolved; verification probes tiếp tục
+có `training_eligible=false`.
+
+Kết quả final của hai branch dùng cùng 128 selected IDs:
+
+| Branch | Optimizer steps | HANS accuracy | HANS non-entailment | MNLI matched | MNLI mismatched | Vai trò |
+|---|---:|---:|---:|---:|---:|---|
+| Continuation | 4 | **0.650000** | **0.363296** | **0.586347** | **0.589605** | Kết quả online closed-loop chính của stateful training |
+| Consolidation | 4 | 0.647200 | 0.355817 | 0.584412 | 0.586554 | Primary apples-to-apples acquisition comparison với one-pass baselines |
+
+Continuation hơn consolidation `0.0028`, tức `0.28` điểm phần trăm HANS. Vì
+hai branch dùng đúng cùng selected examples, cùng CE objective, cùng tổng bốn
+optimizer steps và cùng một lần exposure cho mỗi example, chênh lệch này phản
+ánh training schedule/state continuity chứ không phải khác acquisition pool.
+
+Completion checklist:
+
+- [x] v7 config snapshot được ghi vào output directory.
+- [x] Cả bốn round lưu và audit đúng adapter chain.
+- [x] AdamW state chain hoàn tất đúng `0 → 1 → 2 → 3 → 4`.
+- [x] Final fresh hypothesis audit hoàn tất.
+- [x] Continuation branch được đánh giá trên gain report, sealed HANS và MNLI.
+- [x] Consolidation được train fresh từ base trên cùng frozen 128 IDs,
+  optimizer `0 → 4`.
+- [x] Consolidation branch được đánh giá trên đúng các evaluation sets trên.
+- [x] `comparison.json`, `V7_COMPARISON.md` và `.complete` đã được tạo.
+- [x] Full seed-42 comparison đã được tạo và vẫn chứa preserved v6 diagnostic
+  row.
+
+Chỉ hai file `branches/*/result.json` sau `.complete` được dùng làm kết quả v7;
+`rounds.jsonl` là audit trail để chứng minh checkpoint continuity và hypothesis
+lifecycle.
+
+### 25.6 Continuity incident sau round 1 và resume fix
+
+Run đầu tiên dừng có chủ đích trước khi score/train round 2. Tensor audit phát
+hiện adapter round 1 trên disk vẫn có hash hợp lệ, nhưng adapter vừa load trong
+student trên logical `cuda:1` lệch tối đa `0.044175`. Vì check xảy ra ngay sau
+load và trước probability scoring/training, **không có invalid round-2 update
+nào được tạo**. Round-1 adapter, AdamW state và completed round-2
+verification/synthetic artifacts vẫn hợp lệ.
+
+Root cause được tái hiện độc lập với cùng checkpoint:
+
+| Load placement | Adapter result |
+|---|---|
+| logical `cuda:0` | 392 tensors matched, max difference `0.0` |
+| logical `cuda:1`, PEFT inferred load device | mismatch, max difference khoảng `0.04417` |
+| logical `cuda:1`, adapter loaded explicitly through CPU | 392 tensors matched, max difference `0.0` |
+
+Trong PEFT 0.21.2, `PeftModel.from_pretrained` gọi `infer_device()` khi không
+truyền `torch_device`; hàm này chọn logical `cuda:0` dù base student nằm trên
+logical `cuda:1`. Với cấu hình này, model có thể giữ LoRA tensors vừa khởi tạo
+thay vì serialized values mà không ném hard load error. Fix v7 truyền
+`torch_device="cpu"`; `load_state_dict` sau đó copy từng adapter tensor tới
+device thật của target module. Cách này cũng an toàn khi model dùng device map.
+
+Resume support được thêm để không lặp teacher cost:
+
+- validate config snapshot và từ chối resume nếu config thay đổi;
+- restore 32 selected examples, round-1 adapter và AdamW step 1;
+- validate artifact paths, unique IDs, cumulative counts và contiguous rounds;
+- reuse completed round-2 verification plus 96 accepted synthetic examples;
+- append log thay vì overwrite log cũ;
+- tiếp tục từ scoring/selection/training round 2.
+
+Validation sau fix lúc `2026-10-20 08:24 CEST`:
+
+- full test suite: `205 passed`;
+- real Qwen/PEFT load trên logical `cuda:1`: `392/392` tensors matched,
+  maximum absolute difference `0.0`;
+- dry-run round-2 refresh restore: 5 active hypotheses, 5 states và 96
+  synthetic examples được đọc lại, không gọi teacher.
+
+Lệnh resume đã được dùng để tiếp tục artifact hợp lệ sau incident:
+
+```bash
+TEACHER_GPU=1 STUDENT_GPU=0 ./run_ours_verified_v7_dual_closed_loop.sh --resume
+```
+
+`--overwrite` không được dùng cho incident này vì sẽ xóa các artifact hợp lệ và
+lặp toàn bộ teacher generation/QC. Run sau resume hiện đã hoàn tất; command trên
+chỉ được giữ lại như provenance, không cần chạy lại.

@@ -65,8 +65,18 @@ class QwenNLIStudent:
         if adapter_path:
             from peft import PeftModel
 
+            # PEFT otherwise calls infer_device(), which selects logical
+            # cuda:0 even when the base model lives entirely on cuda:1.  With
+            # PEFT 0.21.2 this can leave newly initialized LoRA tensors in the
+            # model while reporting no hard load error.  Loading the small
+            # adapter state on CPU lets load_state_dict copy every tensor to
+            # the device of its target module and is correct for both a
+            # single-device model and an Accelerate device map.
             self.model = PeftModel.from_pretrained(
-                self.model, adapter_path, is_trainable=True
+                self.model,
+                adapter_path,
+                is_trainable=True,
+                torch_device="cpu",
             )
         self.model.eval()
 

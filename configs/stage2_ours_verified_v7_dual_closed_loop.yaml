@@ -1,0 +1,9 @@
+extends: stage2_ours_verified_v6_closed_loop.yaml
+
+# v7 uses one checkpoint-conditioned acquisition trace and produces two final
+# training branches on the identical selected examples:
+#   (1) stateful LoRA + AdamW continuation through the online rounds;
+#   (3) fresh one-pass consolidation from the original base checkpoint.
+closed_loop:
+  training_protocol: dual_fair_continuation_and_consolidation_v7
+
