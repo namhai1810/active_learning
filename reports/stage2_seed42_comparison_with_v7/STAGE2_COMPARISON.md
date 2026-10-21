@@ -1,4 +1,4 @@
-# Stage 2 seed-42 comparison including verified v2--v7
+# Stage 2 seed-42 comparison including verified v2--v7 and published acquisition baselines
 
 This report consolidates all completed Stage 2 results found for `seed=42` and
 `budget=128`. Duplicate artifacts are counted once. Unless explicitly marked as
@@ -25,6 +25,10 @@ is obtained by multiplying by 100.
 | `ours_verified_v6_closed_loop` | CE | 0.638533 | 0.337518 | 0.576566 | 0.579434 | preserved diagnostic; checkpoint continuity failed; not rankable |
 | `ours_verified_v7_continuation` | CE | **0.650000** | **0.363296** | **0.586347** | **0.589605** | complete stateful closed-loop continuation; best valid verified result |
 | `ours_verified_v7_consolidation` | CE | 0.647200 | 0.355817 | 0.584412 | 0.586554 | complete fresh one-pass consolidation; primary acquisition comparison |
+| `coreset_synthetic` | CE | **0.650533** | **0.369173** | 0.590117 | 0.592555 | complete published selector; ICLR 2018; static verified-v5 pool |
+| `cal_synthetic` | CE | 0.650333 | 0.368639 | **0.591034** | **0.592962** | complete published selector; EMNLP 2021; static verified-v5 pool |
+| `margin_synthetic` | CE | 0.647067 | 0.357420 | 0.585634 | 0.587164 | complete published selector; JMLR 2001; static verified-v5 pool |
+| `badge_synthetic` | CE | 0.647000 | 0.357954 | 0.586144 | 0.587673 | complete published selector; ICLR 2020; static verified-v5 pool |
 
 No completed `result.json` was found for a distinct v4 run at `seed=42` and
 `budget=128`. Therefore v4 is not reported as an experimental result.
@@ -37,15 +41,19 @@ ranking is:
 1. `uncertainty_mnli`: 66.9933%
 2. `failure_driven_no_verification`: 65.4667%
 3. `random_mnli`: 65.2600%
-4. `ours_verified_v7_continuation`: 65.0000%
-5. `ours_verified_v5_ce`: 64.8200%
-6. `ours_verified_target_only_early`: 64.7867%
-7. `ours_verified_v3_ce`: 64.7533%
-8. `ours_verified_v7_consolidation`: 64.7200%
-9. `random_synthetic`: 64.4600%
-10. `ours_verified_v2_ce`: 64.3800%
-11. `ours_verified_v2_pairwise`: 64.3400%
-12. `zero_shot`: 63.8533%
+4. `coreset_synthetic`: 65.0533%
+5. `cal_synthetic`: 65.0333%
+6. `ours_verified_v7_continuation`: 65.0000%
+7. `ours_verified_v5_ce`: 64.8200%
+8. `ours_verified_target_only_early`: 64.7867%
+9. `ours_verified_v3_ce`: 64.7533%
+10. `ours_verified_v7_consolidation`: 64.7200%
+11. `margin_synthetic`: 64.7067%
+12. `badge_synthetic`: 64.7000%
+13. `random_synthetic`: 64.4600%
+14. `ours_verified_v2_ce`: 64.3800%
+15. `ours_verified_v2_pairwise`: 64.3400%
+16. `zero_shot`: 63.8533%
 
 ## Fairness and checkpoint interpretation
 
@@ -69,11 +77,56 @@ ranking is:
 - Both v7 branches use exactly the same acquisition trace and the same 128 selected
   synthetic examples. Their difference isolates the training schedule rather than
   the selected data.
+- The four published synthetic selectors share the same immutable verified-v5
+  candidate pool, random 32-example first round, Qwen/LoRA training recipe,
+  stateful AdamW continuation, 128-example budget, and sealed evaluators. Their
+  differences therefore isolate the acquisition rule within that static pool.
+- This controlled static-v5 comparison is not an equal-candidate-trace comparison
+  with v7. The v7 loop can refresh hypotheses and generate new candidates between
+  rounds; the published selectors cannot.
+
+## Published selector results on the controlled synthetic pool
+
+All four published acquisition runs completed four rounds of 32 examples without
+shortage. The first round is identical random warm-start data; the named selector
+is applied in rounds 2--4.
+
+| Method | Paper / venue | HANS final | HANS non-entailment | Gain-eval 0 -> 128 | Acquisition GPU time |
+|---|---|---:|---:|---:|---:|
+| `coreset_synthetic` | Sener and Savarese, ICLR 2018 | **65.0533%** | **36.9173%** | 62.5067% -> **64.1600%** | **28.9 s** |
+| `cal_synthetic` | Margatina et al., EMNLP 2021 | 65.0333% | 36.8639% | 62.5067% -> 64.0533% | 71.5 s |
+| `margin_synthetic` | Tong and Koller, JMLR 2001 | 64.7067% | 35.7420% | 62.5067% -> 63.5733% | 39.4 s |
+| `badge_synthetic` | Ash et al., ICLR 2020 | 64.7000% | 35.7954% | 62.5067% -> 63.6000% | 62.3 s |
+
+Core-set and CAL are the strongest selectors in this controlled pool. Relative
+to `ours_verified_v7_continuation`, their HANS advantages are only 0.0533 and
+0.0333 percentage points, corresponding to eight and five additional correct
+predictions out of 15,000. These differences are too small to support a win/loss
+claim from one seed. Both methods trade a small decrease in entailment accuracy
+for a larger increase in non-entailment accuracy.
+
+All four published selectors outperform `random_synthetic`: Core-set by 0.5933,
+CAL by 0.5733, Margin by 0.2467, and BADGE by 0.2400 percentage points. This is
+evidence that acquisition is useful on the verified synthetic pool, although it
+does not show that the verified closed-loop selector is better than standard
+published acquisition rules.
+
+The acquisition computation itself is inexpensive (29--71 GPU-seconds per run).
+Most of the 3.88-hour suite runtime comes from repeated HANS/MNLI evaluation, not
+selection or LoRA training. The verified-v5 pool was reused, so its historical
+teacher-token generation cost must not be summed four times as new experimental
+cost.
+
+The corresponding `margin_mnli`, `coreset_mnli`, `badge_mnli`, and `cal_mnli`
+runs are still incomplete and are deliberately absent from this table. They must
+not be inferred from partial checkpoints.
 
 ## Main empirical finding
 
-The strongest valid verified result is `ours_verified_v7_continuation` at
-65.0000% HANS accuracy. Relative to the principal reference points:
+The strongest valid verified result remains `ours_verified_v7_continuation` at
+65.0000% HANS accuracy. Core-set and CAL on the static verified-v5 pool are
+numerically slightly higher, but effectively tied at this single seed. Relative
+to the principal reference points:
 
 | Comparison | HANS difference |
 |---|---:|
@@ -83,6 +136,8 @@ The strongest valid verified result is `ours_verified_v7_continuation` at
 | v7 continuation minus failure-driven without verification | -0.4667 percentage points |
 | v7 continuation minus random MNLI | -0.2600 percentage points |
 | v7 continuation minus uncertainty MNLI | **-1.9933 percentage points** |
+| v7 continuation minus Core-set synthetic | -0.0533 percentage points |
+| v7 continuation minus CAL synthetic | -0.0333 percentage points |
 
 Thus, the approximately two-point gap discussed in the analysis is exact up to
 rounding: `66.9933 - 65.0000 = 1.9933` percentage points.

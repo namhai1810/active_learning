@@ -20,6 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.baselines import RandomBaseline, UncertaintyBaseline
+from src.baselines.literature import (
+    LITERATURE_METADATA,
+    LITERATURE_STRATEGIES,
+    acquire_literature_mnli,
+    acquire_literature_synthetic_pairs,
+)
 from src.benchmark.hans_manifest import FrozenHansManifest, audit_final_test_overlap
 from src.benchmark.selection import (
     select_confidence_safe_entropy_novelty_pairs,
@@ -40,6 +46,7 @@ from src.models.lora_training import (
     LoraTrainingConfig,
     PairwiseLossConfig,
     train_lora,
+    train_lora_stateful,
     train_paired_lora,
 )
 from src.models.qwen_nli import QwenNLIStudent
@@ -51,6 +58,15 @@ from src.utils.io import _atomic_text_write, write_json, write_jsonl
 from src.utils.seed import set_deterministic_seed
 
 
+MNLI_LITERATURE_METHODS = tuple(
+    f"{strategy}_mnli" for strategy in LITERATURE_STRATEGIES
+)
+SYNTHETIC_LITERATURE_METHODS = tuple(
+    f"{strategy}_synthetic" for strategy in LITERATURE_STRATEGIES
+)
+LITERATURE_METHODS = MNLI_LITERATURE_METHODS + SYNTHETIC_LITERATURE_METHODS
+MNLI_METHODS = ("random_mnli", "uncertainty_mnli") + MNLI_LITERATURE_METHODS
+
 METHODS = (
     "zero_shot",
     "random_mnli",
@@ -58,7 +74,16 @@ METHODS = (
     "random_synthetic",
     "failure_driven_no_verification",
     "ours_verified",
-)
+) + LITERATURE_METHODS
+
+
+def _literature_strategy(method: str) -> str:
+    for suffix in ("_mnli", "_synthetic"):
+        if method.endswith(suffix):
+            strategy = method[: -len(suffix)]
+            if strategy in LITERATURE_STRATEGIES:
+                return strategy
+    raise ValueError(f"Not a literature baseline method: {method!r}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -613,6 +638,28 @@ def main() -> None:
     if not isinstance(ours_selection_value, dict):
         raise ValueError("stage2_benchmark.ours_selection must be a mapping")
     ours_selection_strategy = str(ours_selection_value.get("strategy", ""))
+    literature_value = benchmark.get("literature_baselines", {})
+    if not isinstance(literature_value, dict):
+        raise ValueError("stage2_benchmark.literature_baselines must be a mapping")
+    literature_warm_start_rounds = int(
+        literature_value.get("warm_start_rounds", 1)
+    )
+    literature_embedding_batch_size = int(
+        literature_value.get("embedding_batch_size", 8)
+    )
+    literature_cal_neighbors = int(literature_value.get("cal_neighbors", 10))
+    if literature_warm_start_rounds < 1:
+        raise ValueError("literature warm_start_rounds must be at least one")
+    if literature_embedding_batch_size <= 0 or literature_cal_neighbors <= 0:
+        raise ValueError("literature embedding batch size and CAL neighbors must be positive")
+    if (
+        args.method in LITERATURE_METHODS
+        and args.rounds <= literature_warm_start_rounds
+    ):
+        raise ValueError(
+            "Literature active-learning runs require at least one acquisition "
+            "round after the shared random warm start"
+        )
     use_v2_utility_selection = (
         args.method == "ours_verified"
         and ours_selection_strategy == "stratified_student_utility_v1"
@@ -632,7 +679,14 @@ def main() -> None:
     adaptive_stopping_value = benchmark.get("ours_adaptive_stopping", {})
     if not isinstance(adaptive_stopping_value, dict):
         raise ValueError("stage2_benchmark.ours_adaptive_stopping must be a mapping")
-    use_adaptive_stopping = bool(adaptive_stopping_value.get("enabled", False))
+    # Adaptive stopping belongs exclusively to the planned ours_verified
+    # selector. Literature baselines may inherit an ours_verified config to
+    # reuse the same model, evaluator, and controlled synthetic pool; they must
+    # not inherit this method-specific runtime behavior.
+    use_adaptive_stopping = bool(
+        args.method == "ours_verified"
+        and adaptive_stopping_value.get("enabled", False)
+    )
     if use_adaptive_stopping and not use_planned_utility_selection:
         raise ValueError(
             "ours_adaptive_stopping requires a planned ours_verified selector"
@@ -663,7 +717,7 @@ def main() -> None:
     mnli_pool: list[MNLIExample] = []
     synthetic_pool: list[SyntheticNLIExample] = []
     provenance: dict[str, Any] | None = None
-    if args.method in {"random_mnli", "uncertainty_mnli"}:
+    if args.method in MNLI_METHODS:
         mnli_pool = load_mnli(
             split=str(pool_config.get("split", "train")),
             dataset_name=str(pool_config.get("name", "nyu-mll/glue")),
@@ -673,7 +727,21 @@ def main() -> None:
             drop_unlabeled=True,
         )
     elif args.method not in {"zero_shot"}:
-        synthetic_pool, provenance = _synthetic_pool(benchmark, args.method, args.seed)
+        synthetic_source = (
+            str(literature_value.get("synthetic_source_method", "ours_verified"))
+            if args.method in SYNTHETIC_LITERATURE_METHODS
+            else args.method
+        )
+        synthetic_pool, provenance = _synthetic_pool(
+            benchmark, synthetic_source, args.seed
+        )
+        if args.method in SYNTHETIC_LITERATURE_METHODS:
+            provenance = {
+                **provenance,
+                "controlled_literature_selector": _literature_strategy(args.method),
+                "controlled_source_method": synthetic_source,
+                "controlled_selection_unit": "complete_pair",
+            }
 
     verified_abstention = bool(
         args.method == "ours_verified"
@@ -682,9 +750,12 @@ def main() -> None:
     )
 
     current_adapter = model.get("adapter_path")
+    current_optimizer_state: str | None = None
     initial_checkpoint = checkpoint_descriptor(model)
     selected_ids: list[str] = []
     selected_training_rows: list[dict[str, Any]] = []
+    selected_mnli_history: list[MNLIExample] = []
+    selected_synthetic_history: list[SyntheticNLIExample] = []
     round_records: list[dict[str, Any]] = []
     checkpoint_paths: list[tuple[int, str | None]] = [(0, current_adapter)]
     student = None if args.method == "zero_shot" else _student(model, current_adapter)
@@ -866,7 +937,11 @@ def main() -> None:
         acquisition_wall_start = time.perf_counter()
         acquisition_timer = (
             _start_gpu_timer(student)
-            if args.method == "uncertainty_mnli" or use_v2_utility_selection
+            if (
+                args.method == "uncertainty_mnli"
+                or args.method in LITERATURE_METHODS
+                or use_v2_utility_selection
+            )
             else None
         )
         acquisition_scored_examples = 0
@@ -893,6 +968,61 @@ def main() -> None:
                 else []
             )
             acquired_synthetic = []
+        elif args.method in MNLI_LITERATURE_METHODS:
+            available = min(requested, len(remaining_mnli))
+            acquired_mnli, shortage = (
+                acquire_literature_mnli(
+                    _literature_strategy(args.method),
+                    remaining_mnli,
+                    budget=available,
+                    seed=args.seed + round_index - 1,
+                    student=student,
+                    probability_batch_size=batch_size,
+                    embedding_batch_size=literature_embedding_batch_size,
+                    references=selected_mnli_history,
+                    warm_start=round_index <= literature_warm_start_rounds,
+                    cal_neighbors=literature_cal_neighbors,
+                )
+                if available
+                else ([], {
+                    "selection_strategy": _literature_strategy(args.method),
+                    "requested_examples": requested,
+                    "actual_examples": 0,
+                    "candidate_examples_scored": 0,
+                    "reference_examples_scored": 0,
+                    "shortage": True,
+                })
+            )
+            acquisition_scored_examples = int(
+                shortage.get("candidate_examples_scored", 0)
+            ) + int(shortage.get("reference_examples_scored", 0))
+            acquired_synthetic = []
+        elif args.method in SYNTHETIC_LITERATURE_METHODS:
+            remaining_synthetic = [
+                item for item in synthetic_pool if item.id not in set(selected_ids)
+            ]
+            acquired_synthetic, shortage = acquire_literature_synthetic_pairs(
+                _literature_strategy(args.method),
+                remaining_synthetic,
+                budget=requested,
+                seed=args.seed + round_index - 1,
+                student=student,
+                probability_batch_size=batch_size,
+                embedding_batch_size=literature_embedding_batch_size,
+                references=selected_synthetic_history,
+                warm_start=round_index <= literature_warm_start_rounds,
+                cal_neighbors=literature_cal_neighbors,
+            )
+            acquisition_scored_examples = int(
+                shortage.get("candidate_examples_scored", 0)
+            ) + int(shortage.get("reference_examples_scored", 0))
+            if shortage.get("shortage"):
+                raise ValueError(
+                    "Controlled synthetic literature pool cannot satisfy the "
+                    f"budget for {args.method}: requested={requested}, "
+                    f"actual={len(acquired_synthetic)}"
+                )
+            acquired_mnli = [item.to_mnli() for item in acquired_synthetic]
         else:
             if use_planned_utility_selection:
                 offset = len(selected_ids)
@@ -984,8 +1114,9 @@ def main() -> None:
             acquisition_gpu_seconds = planned_acquisition_gpu_seconds
             acquisition_wall_seconds = planned_acquisition_wall_seconds
         actual = len(acquired_mnli)
-        if args.method in {"random_mnli", "uncertainty_mnli"}:
+        if args.method in MNLI_METHODS:
             shortage = {
+                **(shortage if args.method in MNLI_LITERATURE_METHODS else {}),
                 "requested_examples": requested,
                 "actual_examples": actual,
                 "shortage": actual < requested,
@@ -1023,6 +1154,20 @@ def main() -> None:
             )
             train_loss = paired_result.total_loss
             loss_components: dict[str, Any] | None = asdict(paired_result)
+        elif args.method in LITERATURE_METHODS:
+            optimizer_state_output = round_dir / "optimizer_state.pt"
+            stateful_result = train_lora_stateful(
+                student,
+                acquired_mnli,
+                training,
+                round_dir / "adapter",
+                args.seed + round_index - 1,
+                optimizer_state_input=current_optimizer_state,
+                optimizer_state_output=optimizer_state_output,
+            )
+            train_loss = stateful_result.total_loss
+            loss_components = asdict(stateful_result)
+            current_optimizer_state = str(optimizer_state_output)
         else:
             train_loss = train_lora(
                 student, acquired_mnli, training, round_dir / "adapter",
@@ -1035,6 +1180,10 @@ def main() -> None:
         ending = checkpoint_descriptor({**model, "adapter_path": current_adapter})
         ids = [item.id for item in acquired_mnli]
         selected_ids.extend(ids)
+        if args.method in MNLI_LITERATURE_METHODS:
+            selected_mnli_history.extend(acquired_mnli)
+        if args.method in SYNTHETIC_LITERATURE_METHODS:
+            selected_synthetic_history.extend(acquired_synthetic)
         if acquired_synthetic:
             selected_training_rows.extend(item.to_dict() for item in acquired_synthetic)
         else:
@@ -1354,8 +1503,39 @@ def main() -> None:
             ),
         },
         "rounds": args.rounds,
-        "cross_source_baseline": args.method in {"random_mnli", "uncertainty_mnli"},
+        "cross_source_baseline": args.method in MNLI_METHODS,
         "equal_data_access_claimed": False,
+        "literature_baseline": (
+            {
+                **LITERATURE_METADATA[_literature_strategy(args.method)],
+                "strategy": _literature_strategy(args.method),
+                "pool": (
+                    "mnli_train"
+                    if args.method in MNLI_LITERATURE_METHODS
+                    else str(
+                        literature_value.get(
+                            "synthetic_source_method", "ours_verified"
+                        )
+                    )
+                ),
+                "warm_start_rounds": literature_warm_start_rounds,
+                "warm_start_examples": sum(
+                    int(item["actual_examples"])
+                    for item in round_records[:literature_warm_start_rounds]
+                ),
+                "cal_neighbors": (
+                    literature_cal_neighbors
+                    if _literature_strategy(args.method) == "cal"
+                    else None
+                ),
+                "controlled_synthetic_pair_adapter": (
+                    args.method in SYNTHETIC_LITERATURE_METHODS
+                ),
+                "optimizer_state_continuity": "adamw_state_carried_across_rounds",
+            }
+            if args.method in LITERATURE_METHODS
+            else None
+        ),
         "training_objective": (
             "none_abstained"
             if verified_abstention
@@ -1373,7 +1553,9 @@ def main() -> None:
         ),
         "pair_structure_used_only_for_selection": args.method in {
             "random_synthetic", "failure_driven_no_verification"
-        } or (args.method == "ours_verified" and not use_pairwise_objective),
+        } or args.method in SYNTHETIC_LITERATURE_METHODS or (
+            args.method == "ours_verified" and not use_pairwise_objective
+        ),
         "pairwise_loss_config": (
             asdict(pairwise_training) if pairwise_training is not None else None
         ),

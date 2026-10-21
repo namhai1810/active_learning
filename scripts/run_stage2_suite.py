@@ -1,4 +1,4 @@
-To#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Run the predeclared Stage 2 Experiment A or B grid without overwriting runs."""
 
 from __future__ import annotations
@@ -17,6 +17,14 @@ EXPERIMENT_A_METHODS = (
     "zero_shot", "random_mnli", "uncertainty_mnli",
     "random_synthetic", "failure_driven_no_verification", "ours_verified",
 )
+LITERATURE_METHODS = (
+    "margin_mnli", "coreset_mnli", "badge_mnli", "cal_mnli",
+    "margin_synthetic", "coreset_synthetic", "badge_synthetic", "cal_synthetic",
+)
+EXPERIMENT_B_METHODS = (
+    "random_mnli", "uncertainty_mnli", "ours_verified", *LITERATURE_METHODS,
+)
+ALL_METHODS = tuple(dict.fromkeys((*EXPERIMENT_A_METHODS, *EXPERIMENT_B_METHODS)))
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         nargs="+",
-        choices=EXPERIMENT_A_METHODS,
+        choices=ALL_METHODS,
         help="Run only these methods (default: the complete experiment grid).",
     )
     parser.add_argument(
@@ -68,12 +76,15 @@ def main() -> None:
         rounds, per_round = 1, None
     else:
         default_methods = ("random_mnli", "uncertainty_mnli", "ours_verified")
+        allowed_methods = EXPERIMENT_B_METHODS
         default_budgets = [128]
         rounds, per_round = 4, 32
     methods = tuple(args.methods) if args.methods else default_methods
     seeds = list(args.seeds) if args.seeds else configured_seeds
     budgets = list(args.budgets) if args.budgets else default_budgets
-    invalid_methods = sorted(set(methods) - set(default_methods))
+    if args.experiment == "A":
+        allowed_methods = EXPERIMENT_A_METHODS
+    invalid_methods = sorted(set(methods) - set(allowed_methods))
     invalid_seeds = sorted(set(seeds) - set(configured_seeds))
     invalid_budgets = sorted(set(budgets) - set(default_budgets))
     if invalid_methods:

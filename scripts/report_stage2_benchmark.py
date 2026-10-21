@@ -29,6 +29,14 @@ METHOD_ORDER = (
     "random_synthetic",
     "failure_driven_no_verification",
     "ours_verified",
+    "margin_mnli",
+    "coreset_mnli",
+    "badge_mnli",
+    "cal_mnli",
+    "margin_synthetic",
+    "coreset_synthetic",
+    "badge_synthetic",
+    "cal_synthetic",
 )
 METHOD_COLORS = {
     "zero_shot": "#64748B",
@@ -37,6 +45,14 @@ METHOD_COLORS = {
     "random_synthetic": "#F59E0B",
     "failure_driven_no_verification": "#F97316",
     "ours_verified": "#10B981",
+    "margin_mnli": "#2563EB",
+    "coreset_mnli": "#0891B2",
+    "badge_mnli": "#7C3AED",
+    "cal_mnli": "#DB2777",
+    "margin_synthetic": "#65A30D",
+    "coreset_synthetic": "#0D9488",
+    "badge_synthetic": "#9333EA",
+    "cal_synthetic": "#E11D48",
 }
 
 
@@ -630,8 +646,9 @@ def main() -> None:
         "",
         f"Frozen HANS manifest: `{next(iter(hashes))}`",
         "",
-        "Random/Uncertainty are MNLI cross-source baselines; equal data access with "
-        "HANS-guided synthetic methods is not claimed. Random-synthetic and the "
+        "Methods using the MNLI acquisition pool are cross-source baselines; equal "
+        "data access with HANS-guided synthetic methods is not claimed. "
+        "Random-synthetic and the "
         "no-verification ablation use pairs for selection but train with per-example "
         "cross-entropy. The objective used by ours is recorded per run.",
         "Runs that abstain because no failure hypothesis is certified are retained "
@@ -678,6 +695,42 @@ def main() -> None:
                 ),
             )
         )
+    literature_rows = [
+        result for result in results
+        if isinstance(result.get("literature_baseline"), dict)
+    ]
+    if literature_rows:
+        lines.extend(
+            [
+                "",
+                "## Published active-learning baselines",
+                "",
+                "All rows below use the shared Qwen/LoRA Stage-2 implementation. "
+                "Round 1 is an identical random warm start; rounds 2--4 apply the "
+                "published acquisition rule. LoRA and AdamW state continue across "
+                "rounds. Synthetic variants preserve complete pairs.",
+                "",
+                "| Run method | Paper | Venue | Acquisition pool | Local code |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        literature_by_method = {
+            str(result["method"]): result for result in literature_rows
+        }
+        for result in sorted(
+            literature_by_method.values(), key=lambda value: str(value["method"])
+        ):
+            metadata = result["literature_baseline"]
+            lines.append(
+                "| `{method}` | {paper} | {venue}, {year} | `{pool}` | `{code}` |".format(
+                    method=result["method"],
+                    paper=metadata["paper"],
+                    venue=metadata["venue"],
+                    year=metadata["year"],
+                    pool=metadata["pool"],
+                    code=metadata["implementation"],
+                )
+            )
     if verification_diagnostics:
         def verification_percentage(value: Any) -> str:
             return "NA" if value is None else f"{100.0 * float(value):.2f}%"

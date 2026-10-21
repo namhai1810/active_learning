@@ -1,0 +1,18 @@
+extends: stage2_benchmark_ours_verified_v5.yaml
+
+stage2_benchmark:
+  # This config inherits v5 only to reuse its frozen evaluation protocol and
+  # verified synthetic artifact. Stopping decisions from ours_verified are not
+  # part of any published acquisition baseline.
+  ours_adaptive_stopping:
+    enabled: false
+
+  literature_baselines:
+    # All published methods receive exactly the same initial labeled batch.
+    warm_start_rounds: 1
+    embedding_batch_size: 8
+    cal_neighbors: 10
+
+    # Controlled synthetic comparisons reuse one immutable verified pool. No
+    # method regenerates examples or receives a different teacher/QC artifact.
+    synthetic_source_method: ours_verified
