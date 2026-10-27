@@ -15,6 +15,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.active_learning.closed_loop import (
+    verification_states as closed_loop_verification_states,
+)
 from src.data.pipeline_split import (
     materialize_role,
     records_by_id,
@@ -72,7 +75,7 @@ def _load_candidates(payload: dict[str, Any]) -> dict[str, FailureHypothesis]:
 
 
 def _verification_states(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Classify hypotheses without treating an unresolved interval as rejection."""
+    """Validate provenance, then use the closed-loop canonical state machine."""
     if payload.get("mode") != "llm_main" or payload.get("oracle_debug") is not False:
         raise ValueError("Expected main-method verification results")
     if (
@@ -83,46 +86,15 @@ def _verification_states(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw = payload.get("results")
     if not isinstance(raw, list):
         raise ValueError("Verification results must be a list")
-    metric = str(payload.get("certification_metric", "strict_joint"))
-    threshold = float(payload.get("tau_v", 0.5))
-    states: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
     for item in raw:
         if not isinstance(item, dict):
             raise ValueError("Every verification result must be an object")
         hypothesis_id = str(item.get("hypothesis_id", ""))
-        if not hypothesis_id or hypothesis_id in states:
+        if not hypothesis_id or hypothesis_id in seen:
             raise ValueError("Verification hypothesis IDs must be non-empty and unique")
-        diagnostics = item.get("diagnostics")
-        diagnostic = diagnostics.get(metric) if isinstance(diagnostics, dict) else None
-        if not isinstance(diagnostic, dict):
-            if item.get("certified") is True:
-                state = "certified"
-                lower_bound = float(item.get("lower_bound", threshold))
-                upper_bound = float(item.get("upper_bound", 1.0))
-            else:
-                state = "invalid"
-                lower_bound = None
-                upper_bound = None
-        else:
-            estimate = float(diagnostic["nu_hat"])
-            radius = float(diagnostic["confidence_radius"])
-            lower_bound = float(diagnostic["lower_bound"])
-            upper_bound = min(1.0, estimate + radius)
-            if item.get("certified") is True:
-                state = "certified"
-            elif upper_bound < threshold:
-                state = "refuted"
-            else:
-                state = "unresolved"
-        states[hypothesis_id] = {
-            "state": state,
-            "certified": item.get("certified") is True,
-            "lower_bound": lower_bound,
-            "upper_bound": upper_bound,
-            "threshold": threshold,
-            "metric": metric,
-        }
-    return states
+        seen.add(hypothesis_id)
+    return closed_loop_verification_states(payload)
 
 
 def _retained_ids(
@@ -424,7 +396,7 @@ def main() -> None:
         else:
             verification_payload = None
             verification_summary = None
-            certified = list(hypotheses)
+            certified = []
             retained = list(hypotheses)
             verification_states = {
                 hypothesis_id: {

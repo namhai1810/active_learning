@@ -36,10 +36,12 @@ from src.evaluation.hans import evaluate_hans
 from src.evaluation.mnli import evaluate_mnli
 from src.models.adapter_continuity import audit_loaded_adapter
 from src.models.lora_training import (
+    EarlyStoppingConfig,
     LoraTrainingConfig,
     PairedTrainingResult,
     train_lora,
     train_lora_stateful,
+    train_lora_stateful_early_stopping,
 )
 from src.models.qwen_nli import QwenNLIStudent
 from src.synthetic.types import SyntheticNLIExample
@@ -54,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="Override all experiment RNG seeds while preserving frozen data splits.",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--overwrite", action="store_true")
     mode.add_argument(
@@ -62,6 +69,32 @@ def parse_args() -> argparse.Namespace:
         help="Resume a validated incomplete v7 run without repeating completed rounds.",
     )
     return parser.parse_args()
+
+
+def _apply_seed_override(config: dict[str, Any], seed: int) -> None:
+    """Override stochastic experiment seeds but never the frozen split seed."""
+    closed = require_mapping(config, "closed_loop")
+    prior_seed = int(closed.get("seed", config.get("seed", 42)))
+    delta = seed - prior_seed
+    config["seed"] = seed
+    closed["seed"] = seed
+    for section_name in (
+        "hypothesis_generation",
+        "verification",
+        "synthetic_generation",
+        "synthetic_validation",
+    ):
+        section = config.get(section_name)
+        if isinstance(section, dict) and "seed" in section:
+            section["seed"] = seed
+    scorer = config.get("hypothesis_generation", {}).get("error_scorer")
+    if isinstance(scorer, dict) and "seed" in scorer:
+        scorer["seed"] = seed
+    verification = config.get("verification")
+    if isinstance(verification, dict) and "label_validation_seed" in verification:
+        verification["label_validation_seed"] = (
+            int(verification["label_validation_seed"]) + delta
+        )
 
 
 def _student(model: dict[str, Any], adapter: str | None) -> QwenNLIStudent:
@@ -86,6 +119,100 @@ def _clear_cuda_cache() -> None:
             torch.cuda.empty_cache()
     except ImportError:
         pass
+
+
+def _binary_hans_validation(
+    probabilities: list[list[float]],
+    examples: list[HANSExample],
+) -> dict[str, Any]:
+    """Compute binary HANS NLL without exposing the sealed final test."""
+    if len(probabilities) != len(examples) or not examples:
+        raise ValueError("Validation probabilities and HANS examples must align")
+    losses: list[float] = []
+    predictions: list[str] = []
+    for row, example in zip(probabilities, examples, strict=True):
+        if len(row) != len(MNLI_LABELS):
+            raise ValueError("Validation probability rows must use MNLI label order")
+        entailment = float(row[0])
+        non_entailment = float(row[1]) + float(row[2])
+        target = entailment if example.gold == "entailment" else non_entailment
+        losses.append(-math.log(max(target, 1e-12)))
+        predictions.append(
+            "entailment" if entailment >= non_entailment else "non-entailment"
+        )
+    metrics = _metrics_from_rows(
+        [
+            {
+                "gold": example.gold,
+                "prediction": prediction,
+                "heuristic": example.heuristic,
+                "subcase": example.subcase,
+            }
+            for example, prediction in zip(examples, predictions, strict=True)
+        ]
+    )
+    return {
+        "loss": sum(losses) / len(losses),
+        "accuracy": metrics["overall_accuracy"],
+        "entailment_accuracy": metrics["entailment_accuracy"],
+        "non_entailment_accuracy": metrics["non_entailment_accuracy"],
+        "num_examples": len(examples),
+        "source": "predeclared_gain_eval_stopping_subset",
+        "sealed_final_test_used": False,
+    }
+
+
+def _teacher_usage(run_dir: Path) -> dict[str, float]:
+    """Sum measured teacher usage from canonical teacher-call logs only."""
+    totals = {
+        "input_tokens": 0.0,
+        "output_tokens": 0.0,
+        "teacher_wall_clock_seconds": 0.0,
+        "calls": 0.0,
+    }
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            usage = value.get("usage")
+            if isinstance(usage, dict):
+                totals["input_tokens"] += float(usage.get("input_tokens", 0.0))
+                totals["output_tokens"] += float(usage.get("output_tokens", 0.0))
+                totals["teacher_wall_clock_seconds"] += float(
+                    usage.get("wall_clock_seconds", 0.0)
+                )
+                totals["calls"] += 1.0
+            for key, item in value.items():
+                if key != "usage":
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    calls_dir = run_dir / "teacher_calls"
+    if calls_dir.is_dir():
+        for call_path in sorted(calls_dir.glob("*.jsonl")):
+            for record in read_jsonl(call_path):
+                visit(record)
+    return totals
+
+
+def _bypassed_verification_states(
+    candidates: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Retain every candidate while making the bypass explicit in artifacts."""
+    return {
+        str(item["id"]): {
+            "state": "unresolved",
+            "certified": False,
+            "verification_mode": "off",
+            "verification_bypassed": True,
+            "lower_bound": None,
+            "upper_bound": None,
+            "threshold": None,
+            "metric": None,
+        }
+        for item in candidates
+    }
 
 
 def _hans(rows: list[dict[str, Any]]) -> list[HANSExample]:
@@ -287,7 +414,6 @@ def _reuse_completed_refresh(
     required = [
         round_dir / "lifecycle.json",
         round_dir / "hypotheses.json",
-        round_dir / "verification" / "results.json",
     ]
     if generate_pool:
         required.extend(
@@ -305,6 +431,18 @@ def _reuse_completed_refresh(
             f"artifacts: {missing}"
         )
     lifecycle = read_json(round_dir / "lifecycle.json")
+    verification_mode = str(lifecycle.get("verification_mode", "on"))
+    if verification_mode not in {"on", "off"}:
+        raise ValueError("Cached refresh has an invalid verification mode")
+    verification_result = round_dir / "verification" / "results.json"
+    if verification_mode == "on" and not verification_result.is_file():
+        raise RuntimeError(
+            "Cannot resume verification-ON refresh without verification results"
+        )
+    if verification_mode == "off" and verification_result.exists():
+        raise RuntimeError(
+            "Verification-OFF refresh unexpectedly contains verification results"
+        )
     if int(lifecycle.get("refresh_round", -1)) != round_index:
         raise ValueError("Cached refresh round does not match the requested round")
     cached_adapter = lifecycle.get("checkpoint_adapter")
@@ -365,6 +503,9 @@ def _refresh_hypotheses(
     dict[str, Any],
 ]:
     closed = require_mapping(base_config, "closed_loop")
+    verification_mode = str(closed.get("verification_mode", "on"))
+    if verification_mode not in {"on", "off"}:
+        raise ValueError("closed_loop.verification_mode must be on or off")
     round_dir = output / "refresh" / f"round_{round_index:03d}"
     if reuse_completed and round_dir.exists():
         reused = _reuse_completed_refresh(
@@ -424,10 +565,12 @@ def _refresh_hypotheses(
     if not (round_dir / "hans_split_v2.json").is_file():
         raise RuntimeError("Discovery stage did not write its split manifest")
 
-    if candidates:
+    if candidates and verification_mode == "on":
         _run_stage("verify_hypotheses.py", config_path, round_dir)
         verification = read_json(round_dir / "verification" / "results.json")
         states = verification_states(verification)
+    elif candidates:
+        states = _bypassed_verification_states(candidates)
     else:
         states = {}
     next_active = sorted(
@@ -457,10 +600,14 @@ def _refresh_hypotheses(
         "candidate_ids": [str(item["id"]) for item in candidates],
         "novel_hypothesis_ids": merge_log["novel_accepted"],
         "reactivated_hypothesis_ids": merge_log["historical_reactivated"],
+        "verification_mode": verification_mode,
+        "verification_performed": verification_mode == "on" and bool(candidates),
         "states": states,
         "next_active_ids": next_active,
         "generated_training_examples": len(additions),
-        "verification_probes_training_eligible": False,
+        "verification_probes_training_eligible": (
+            False if verification_mode == "on" else None
+        ),
     }
     write_json(round_dir / "lifecycle.json", lifecycle)
     return next_archive, next_active, states, additions, lifecycle
@@ -546,6 +693,8 @@ def _evaluate_checkpoint(
 def main() -> None:
     args = parse_args()
     config = load_yaml_with_extends(args.config)
+    if args.seed is not None:
+        _apply_seed_override(config, args.seed)
     closed = require_mapping(config, "closed_loop")
     benchmark = require_mapping(config, "stage2_benchmark")
     require_mapping(config, "teacher")
@@ -565,9 +714,26 @@ def main() -> None:
     if training_protocol not in {
         "legacy_independent_rounds_v6",
         "dual_fair_continuation_and_consolidation_v7",
+        "stateful_early_stopping_verification_ablation_v7",
     }:
         raise ValueError(f"Unsupported closed-loop training protocol: {training_protocol}")
     dual_v7 = training_protocol == "dual_fair_continuation_and_consolidation_v7"
+    early_stop_v7 = (
+        training_protocol == "stateful_early_stopping_verification_ablation_v7"
+    )
+    stateful_training = dual_v7 or early_stop_v7
+    verification_mode = str(closed.get("verification_mode", "on"))
+    if verification_mode not in {"on", "off"}:
+        raise ValueError("closed_loop.verification_mode must be on or off")
+    expected_policy = (
+        "failure_targeted_verified"
+        if verification_mode == "on"
+        else "failure_targeted_verification_bypassed"
+    )
+    if early_stop_v7 and config.get("stage2_policy") != expected_policy:
+        raise ValueError(
+            "stage2_policy and closed_loop.verification_mode are inconsistent"
+        )
     if total_budget != per_round * max_rounds or per_round % 2:
         raise ValueError("Closed-loop budget must equal max_rounds * even per-round size")
     set_deterministic_seed(seed)
@@ -637,10 +803,17 @@ def main() -> None:
 
     model = require_mapping(config, "model")
     model["device_map"] = os.environ.get("CLOSED_LOOP_STUDENT_DEVICE", "cuda:1")
-    training = LoraTrainingConfig.from_mapping(require_mapping(config, "training"))
+    training_mapping = require_mapping(config, "training")
+    training = LoraTrainingConfig.from_mapping(training_mapping)
+    early_stopping = (
+        EarlyStoppingConfig.from_mapping(training_mapping)
+        if early_stop_v7
+        else None
+    )
     selection = require_mapping(closed, "selection")
     current_adapter = model.get("adapter_path")
     current_optimizer_state: str | None = None
+    committed_optimizer_step = 0
     selected_ids: list[str] = []
     selected_rows: list[dict[str, Any]] = []
     cumulative_hypothesis_counts: Counter[str] = Counter()
@@ -648,11 +821,24 @@ def main() -> None:
     stop_reason = "maximum_budget_reached"
     start_round = 1
 
-    if args.resume:
-        rounds_path = output / "rounds.jsonl"
-        selected_path = output / "selected_training_examples.jsonl"
-        if not rounds_path.is_file() or not selected_path.is_file():
-            raise RuntimeError("Resume requires completed round and selected-example logs")
+    rounds_path = output / "rounds.jsonl"
+    selected_path = output / "selected_training_examples.jsonl"
+    resume_log_presence = (rounds_path.is_file(), selected_path.is_file())
+    if args.resume and any(resume_log_presence) and not all(resume_log_presence):
+        raise RuntimeError(
+            "Resume found only one of the round/selected-example logs"
+        )
+    resume_from_initialization = args.resume and not any(resume_log_presence)
+    if resume_from_initialization:
+        unexpected = [path for path in output.iterdir() if path.name != "config.yaml"]
+        if unexpected:
+            raise RuntimeError(
+                "Cannot restart a pre-round resume with unexpected artifacts: "
+                f"{[str(path) for path in unexpected]}"
+            )
+        print("[RESUME] Config snapshot exists; restarting safely from round 1")
+
+    if args.resume and not resume_from_initialization:
         round_records = [dict(item) for item in read_jsonl(rounds_path)]
         if not round_records:
             raise RuntimeError("Resume found no completed training round")
@@ -675,11 +861,12 @@ def main() -> None:
             raise ValueError("Resume cumulative example metadata is inconsistent")
         current_adapter = str(last_record["ending_adapter"])
         optimizer_record = last_record.get("optimizer_continuity")
-        if dual_v7:
+        if stateful_training:
             if not isinstance(optimizer_record, dict):
                 raise ValueError("Resume round has no optimizer continuity record")
             current_optimizer_state = str(optimizer_record["ending_state"])
-            if int(optimizer_record["ending_step"]) != len(round_records):
+            committed_optimizer_step = int(optimizer_record["ending_step"])
+            if dual_v7 and committed_optimizer_step != len(round_records):
                 raise ValueError("Resume optimizer step does not match completed rounds")
         for required_path in (current_adapter, current_optimizer_state):
             if required_path is None:
@@ -728,12 +915,15 @@ def main() -> None:
         print(
             f"[RESUME] Restored {len(round_records)} completed round(s), "
             f"{len(selected_ids)} selected examples, optimizer step "
-            f"{len(round_records)}"
+            f"{committed_optimizer_step}"
         )
 
     for round_index in range(start_round, max_rounds + 1):
         refresh_record: dict[str, Any] | None = None
+        refresh_seconds = 0.0
+        refresh_teacher_usage = _teacher_usage(output / "refresh" / f"round_{round_index:03d}")
         if round_index > 1:
+            refresh_started = time.perf_counter()
             archive, active_ids, states, additions, refresh_record = _refresh_hypotheses(
                 output=output,
                 base_config=config,
@@ -752,6 +942,10 @@ def main() -> None:
                 threshold=float(closed.get("pool_near_duplicate_threshold", 0.92)),
             )
             refresh_record["pool_merge"] = pool_merge
+            refresh_seconds = time.perf_counter() - refresh_started
+            refresh_teacher_usage = _teacher_usage(
+                output / "refresh" / f"round_{round_index:03d}"
+            )
         if not active_ids:
             stop_reason = (
                 "all_tracked_hypotheses_refuted_and_no_novel_hypothesis"
@@ -771,9 +965,10 @@ def main() -> None:
         student = _student(model, current_adapter)
         starting_adapter_audit = (
             audit_loaded_adapter(student.model, current_adapter)
-            if dual_v7 and current_adapter
+            if stateful_training and current_adapter
             else None
         )
+        acquisition_started = time.perf_counter()
         student.progress_label = f"closed-loop round {round_index} probability scoring"
         probabilities = student.predict_proba(
             [item.premise for item in eligible],
@@ -825,16 +1020,67 @@ def main() -> None:
                 selection.get("new_hypothesis_bonus_weight", 0.50)
             ),
         )
+        acquisition_seconds = time.perf_counter() - acquisition_started
         if len(acquired) != per_round:
             del student
             _clear_cuda_cache()
             stop_reason = "insufficient_verified_synthetic_pairs"
             break
         round_dir = output / "training" / f"round_{round_index:03d}"
-        start = time.perf_counter()
+        training_started = time.perf_counter()
         optimizer_state_output = round_dir / "optimizer_state.pt"
         stateful_result: PairedTrainingResult | None = None
-        if dual_v7:
+        if early_stop_v7:
+            assert early_stopping is not None
+
+            def validation_callback() -> dict[str, Any]:
+                student.progress_label = (
+                    f"round {round_index} early-stopping validation"
+                )
+                validation_probabilities = student.predict_proba(
+                    [item.premise for item in stopping_examples],
+                    [item.hypothesis for item in stopping_examples],
+                    batch_size=int(model.get("batch_size", 4)),
+                )
+                return _binary_hans_validation(
+                    validation_probabilities, stopping_examples
+                )
+
+            stateful_result = train_lora_stateful_early_stopping(
+                student,
+                [item.to_mnli() for item in acquired],
+                training,
+                early_stopping,
+                validation_callback,
+                round_dir / "adapter",
+                seed + round_index - 1,
+                optimizer_state_input=current_optimizer_state,
+                optimizer_state_output=optimizer_state_output,
+            )
+            if stateful_result.best_epoch is None:
+                raise RuntimeError("Early-stopping training did not select a best epoch")
+            steps_per_epoch = math.ceil(
+                math.ceil(per_round / training.batch_size)
+                / training.gradient_accumulation_steps
+            )
+            expected_start = committed_optimizer_step
+            expected_end = (
+                expected_start + stateful_result.best_epoch * steps_per_epoch
+            )
+            if (
+                stateful_result.optimizer_step_start != expected_start
+                or stateful_result.optimizer_step_end != expected_end
+            ):
+                raise RuntimeError(
+                    "Early-stopping AdamW continuity/restore check failed: "
+                    f"expected {expected_start}->{expected_end}, observed "
+                    f"{stateful_result.optimizer_step_start}->"
+                    f"{stateful_result.optimizer_step_end}"
+                )
+            committed_optimizer_step = expected_end
+            loss = stateful_result.total_loss
+            current_optimizer_state = str(optimizer_state_output)
+        elif dual_v7:
             stateful_result = train_lora_stateful(
                 student,
                 [item.to_mnli() for item in acquired],
@@ -860,6 +1106,7 @@ def main() -> None:
                     f"{stateful_result.optimizer_step_start}->"
                     f"{stateful_result.optimizer_step_end}"
                 )
+            committed_optimizer_step = expected_end
             loss = stateful_result.total_loss
             current_optimizer_state = str(optimizer_state_output)
         else:
@@ -870,16 +1117,22 @@ def main() -> None:
                 round_dir / "adapter",
                 seed + round_index - 1,
             )
+        training_seconds = time.perf_counter() - training_started
         current_adapter = str(round_dir / "adapter")
         ending_adapter_audit = (
-            audit_loaded_adapter(student.model, current_adapter) if dual_v7 else None
+            audit_loaded_adapter(student.model, current_adapter)
+            if stateful_training
+            else None
         )
+        student.progress_label = f"closed-loop round {round_index} stopping accuracy"
+        stopping_started = time.perf_counter()
         stopping_predictions, stopping_metrics = evaluate_hans(
             student,
             stopping_examples,
             batch_size=int(model.get("batch_size", 4)),
         )
-        elapsed = time.perf_counter() - start
+        stopping_seconds = time.perf_counter() - stopping_started
+        elapsed = training_seconds + stopping_seconds
         del student
         _clear_cuda_cache()
         write_jsonl(round_dir / "stopping_predictions.jsonl", stopping_predictions)
@@ -902,28 +1155,113 @@ def main() -> None:
                 "starting_adapter_load": starting_adapter_audit,
                 "ending_adapter_save": ending_adapter_audit,
             }
-            if dual_v7
+            if stateful_training
             else None,
             "optimizer_continuity": {
                 "state_loaded": stateful_result.optimizer_state_loaded,
                 "starting_step": stateful_result.optimizer_step_start,
                 "ending_step": stateful_result.optimizer_step_end,
+                "last_attempted_step": stateful_result.optimizer_step_last_attempted,
                 "ending_state": current_optimizer_state,
+                "restore_to_best_verified": (
+                    stateful_result.optimizer_step_end
+                    <= stateful_result.optimizer_step_last_attempted
+                ),
             }
             if stateful_result is not None
             else None,
+            "training": (
+                {
+                    "effective_batch_size": (
+                        training.batch_size * training.gradient_accumulation_steps
+                    ),
+                    "micro_batch_size": training.batch_size,
+                    "gradient_accumulation_steps": (
+                        training.gradient_accumulation_steps
+                    ),
+                    "max_epochs": (
+                        early_stopping.max_epochs
+                        if early_stopping is not None
+                        else training.num_epochs
+                    ),
+                    "epochs_completed": stateful_result.epochs_completed,
+                    "best_epoch": stateful_result.best_epoch,
+                    "best_validation_loss": stateful_result.best_validation_loss,
+                    "stopped_early": stateful_result.stopped_early,
+                    "epoch_history": list(stateful_result.epoch_history),
+                }
+                if stateful_result is not None
+                else None
+            ),
+            "resource_usage": {
+                "refresh_wall_seconds": refresh_seconds,
+                "acquisition_gpu_wall_seconds": acquisition_seconds,
+                "training_gpu_wall_seconds": max(
+                    0.0,
+                    training_seconds
+                    - (
+                        stateful_result.validation_seconds
+                        if stateful_result is not None
+                        else 0.0
+                    ),
+                ),
+                "validation_gpu_wall_seconds": (
+                    stateful_result.validation_seconds
+                    if stateful_result is not None
+                    else 0.0
+                ),
+                "stopping_evaluation_gpu_wall_seconds": stopping_seconds,
+                "teacher": refresh_teacher_usage,
+            },
             "wall_clock_seconds_training_and_stopping_eval": elapsed,
             "active_hypothesis_ids": active_ids,
+            "hypothesis_states": {
+                key: states[key] for key in active_ids if key in states
+            },
             "verification_refresh": refresh_record,
             "selection": diagnostics,
             "stopping_metrics": stopping_metrics,
         }
         round_records.append(record)
+        if stateful_result is not None:
+            write_json(
+                round_dir / "training_history.json",
+                {
+                    "round": round_index,
+                    "best_epoch": stateful_result.best_epoch,
+                    "best_validation_loss": stateful_result.best_validation_loss,
+                    "stopped_early": stateful_result.stopped_early,
+                    "optimizer_step_start": stateful_result.optimizer_step_start,
+                    "optimizer_step_end": stateful_result.optimizer_step_end,
+                    "optimizer_step_last_attempted": (
+                        stateful_result.optimizer_step_last_attempted
+                    ),
+                    "epochs": list(stateful_result.epoch_history),
+                },
+            )
         write_jsonl(output / "rounds.jsonl", round_records)
         write_jsonl(output / "selected_training_examples.jsonl", selected_rows)
 
+    if early_stop_v7 and (
+        len(round_records) != max_rounds or len(selected_ids) != total_budget
+    ):
+        raise RuntimeError(
+            "Fixed-budget ablation is incomplete: expected "
+            f"{max_rounds} rounds/{total_budget} examples, observed "
+            f"{len(round_records)} rounds/{len(selected_ids)} examples. "
+            "No final metrics or completion marker were written."
+        )
+
     final_audit = None
+    final_audit_seconds = 0.0
+    final_audit_teacher_usage = {
+        "input_tokens": 0.0,
+        "output_tokens": 0.0,
+        "teacher_wall_clock_seconds": 0.0,
+        "calls": 0.0,
+    }
     if bool(closed.get("final_hypothesis_audit", True)) and current_adapter:
+        final_audit_started = time.perf_counter()
         archive, final_active, final_states, _, final_audit = _refresh_hypotheses(
             output=output,
             base_config=config,
@@ -935,6 +1273,10 @@ def main() -> None:
             active_ids=active_ids,
             generate_pool=False,
             reuse_completed=args.resume,
+        )
+        final_audit_seconds = time.perf_counter() - final_audit_started
+        final_audit_teacher_usage = _teacher_usage(
+            output / "refresh" / f"round_{max_rounds + 1:03d}"
         )
         if not final_active:
             stop_reason = (
@@ -957,6 +1299,165 @@ def main() -> None:
     if leakage["id_overlap"]:
         raise ValueError("Final-test ID overlap detected")
     write_json(output / "hypothesis_archive.json", {"hypotheses": archive})
+
+    if early_stop_v7:
+        if current_adapter is None or not round_records:
+            raise RuntimeError("Early-stopping v7 produced no continuation checkpoint")
+        evaluation_started = time.perf_counter()
+        evaluation = _evaluate_checkpoint(
+            model=model,
+            adapter=str(current_adapter),
+            gain_rows=gain_report_rows,
+            final_rows=final_rows,
+            mnli_config=mnli_config,
+            output=output,
+            audit_adapter=True,
+        )
+        final_evaluation_seconds = time.perf_counter() - evaluation_started
+        teacher_totals = dict(final_audit_teacher_usage)
+        resource_totals = {
+            "refresh_wall_seconds": final_audit_seconds,
+            "acquisition_gpu_wall_seconds": 0.0,
+            "training_gpu_wall_seconds": 0.0,
+            "validation_gpu_wall_seconds": 0.0,
+            "stopping_evaluation_gpu_wall_seconds": 0.0,
+            "final_evaluation_gpu_wall_seconds": final_evaluation_seconds,
+        }
+        for row in round_records:
+            usage = row["resource_usage"]
+            for key in (
+                "refresh_wall_seconds",
+                "acquisition_gpu_wall_seconds",
+                "training_gpu_wall_seconds",
+                "validation_gpu_wall_seconds",
+                "stopping_evaluation_gpu_wall_seconds",
+            ):
+                resource_totals[key] += float(usage[key])
+            for key in teacher_totals:
+                teacher_totals[key] += float(usage["teacher"][key])
+        resource_totals["teacher"] = teacher_totals
+        resource_totals["scope"] = (
+            "current_ablation_run_only_shared_initial_pool_cost_excluded"
+        )
+        resource_totals["gpu_fields"] = (
+            "measured_wall_clock_proxies_not_hardware_utilization_integrals"
+        )
+        fixed_budget_comparable = len(selected_ids) == total_budget
+        result = {
+            "method": f"ours_v7_early_stop_verification_{verification_mode}",
+            "experiment": "verification_on_off_ablation",
+            "seed": seed,
+            "budget": total_budget,
+            "requested_budget": total_budget,
+            "rounds": len(round_records),
+            "per_round_examples": per_round,
+            "actual_training_examples": len(selected_ids),
+            "fixed_budget_comparable": fixed_budget_comparable,
+            "final_metrics_reportable": fixed_budget_comparable,
+            "verification_mode": verification_mode,
+            "verification_is_only_ablation_variable": True,
+            "synthetic_qc_enabled": True,
+            "acquisition_stopping": "disabled_fixed_4x32",
+            "cost_aware_stopping": False,
+            "training_objective": "per_example_causal_lm_cross_entropy",
+            "training_policy": {
+                "stateful_lora": True,
+                "stateful_adamw": True,
+                "micro_batch_size": training.batch_size,
+                "gradient_accumulation_steps": training.gradient_accumulation_steps,
+                "effective_batch_size": (
+                    training.batch_size * training.gradient_accumulation_steps
+                ),
+                "max_epochs": early_stopping.max_epochs,
+                "patience": early_stopping.patience,
+                "min_delta": early_stopping.min_delta,
+                "validation_metric": "binary_hans_negative_log_likelihood",
+                "validation_source": "predeclared_gain_eval_stopping_subset",
+                "restore_best_checkpoint": True,
+            },
+            "protocol": (
+                "discover_verify_or_bypass_generate_qc_select_"
+                "stateful_train_early_stop_refresh_v7"
+            ),
+            "stop_reason": stop_reason,
+            "optimizer_steps": committed_optimizer_step,
+            "optimizer_continuity_verified": all(
+                bool(row["adapter_continuity"]["ending_adapter_save"]["matched"])
+                and bool(row["optimizer_continuity"]["restore_to_best_verified"])
+                and (
+                    row["optimizer_continuity"]["starting_step"]
+                    == (
+                        0
+                        if index == 0
+                        else round_records[index - 1]["optimizer_continuity"][
+                            "ending_step"
+                        ]
+                    )
+                )
+                for index, row in enumerate(round_records)
+            ),
+            "selected_example_ids": selected_ids,
+            "selected_hypothesis_pair_counts": dict(
+                sorted(cumulative_hypothesis_counts.items())
+            ),
+            "final_checkpoint": checkpoint_descriptor(
+                {**model, "adapter_path": current_adapter}
+            ),
+            "hans_final": evaluation["hans_final"],
+            "gain_report": evaluation["gain_report"],
+            "mnli": evaluation["mnli"],
+            "learning_curve": learning_curve,
+            "training_history": [
+                {
+                    "round": row["round"],
+                    **row["training"],
+                    "optimizer_continuity": row["optimizer_continuity"],
+                }
+                for row in round_records
+            ],
+            "hypothesis_history": [
+                {
+                    "round": row["round"],
+                    "active_hypothesis_ids": row["active_hypothesis_ids"],
+                    "states": row["hypothesis_states"],
+                    "refresh": row["verification_refresh"],
+                }
+                for row in round_records
+            ],
+            "final_hypothesis_audit": final_audit,
+            "resource_usage": resource_totals,
+            "sealed_final_test_policy": {
+                "used_for_early_stopping": False,
+                "used_for_tuning": False,
+                "evaluated_after_training": True,
+            },
+            "verification_probes_used_for_training": False,
+            "leakage_audit": leakage,
+        }
+        write_json(output / "result.json", result)
+        lines = [
+            "# V7 training early stopping + verification ablation",
+            "",
+            f"- Verification: {verification_mode.upper()}",
+            f"- Seed: {seed}",
+            f"- Fixed acquisition: {len(round_records)} x {per_round} = {len(selected_ids)} examples",
+            f"- Effective batch: {training.batch_size * training.gradient_accumulation_steps}",
+            f"- Committed AdamW steps: {committed_optimizer_step}",
+            f"- HANS final accuracy: {float(evaluation['hans_final']['overall_accuracy']):.6f}",
+            f"- MNLI matched/mismatched: {float(evaluation['mnli']['matched']['accuracy']):.6f} / {float(evaluation['mnli']['mismatched']['accuracy']):.6f}",
+            "",
+            "Training early stopping uses only the predeclared gain-eval stopping subset.",
+            "The sealed HANS final test and MNLI validation are evaluated only after training.",
+        ]
+        _atomic_text_write(
+            output / "V7_EARLY_STOP_ABLATION.md", "\n".join(lines) + "\n"
+        )
+        _atomic_text_write(
+            output / ".complete",
+            f"v7 early-stop verification-{verification_mode} complete\n",
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
 
     if not dual_v7:
         evaluation = _evaluate_checkpoint(

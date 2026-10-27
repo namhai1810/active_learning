@@ -2,6 +2,12 @@
 
 > **Trạng thái tài liệu:** đây là đặc tả độc lập và là source-of-truth cho toàn bộ model flow, protocol thí nghiệm và cách diễn giải kết quả v7.
 
+> **Phần mở rộng không ghi đè:** thí nghiệm Training Early Stopping +
+> Verification ON/OFF dùng output/config riêng và được mô tả tại
+> [docs/v7_training_early_stopping_verification_ablation.md](docs/v7_training_early_stopping_verification_ablation.md).
+> Các thông số một epoch, bốn optimizer steps và kết quả 65.0000% bên dưới vẫn
+> mô tả đúng run v7 lịch sử; không được hồi tố chúng thành kết quả early-stopping.
+
 ## Đặc tả chuẩn v7
 
 ### 1. Mục tiêu và phạm vi

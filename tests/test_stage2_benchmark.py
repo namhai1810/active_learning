@@ -1,4 +1,6 @@
+import copy
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +33,12 @@ from src.decision.artifact_cost import build_artifact_costs, build_round_incurre
 from src.decision.cost_aware import select_intervention
 from src.decision.types import DecisionCandidate
 from src.evaluation.metrics import compute_hans_metrics
+from src.models.lora_training import (
+    EarlyStoppingConfig,
+    EarlyStoppingTracker,
+    _cpu_tree,
+)
+from src.utils.config import load_yaml_with_extends
 from src.synthetic.types import SyntheticNLIExample
 from scripts.run_stage2_benchmark import (
     _adaptive_stop_decision,
@@ -38,11 +46,16 @@ from scripts.run_stage2_benchmark import (
     _synthetic_pool,
 )
 from scripts.run_stage2_closed_loop import (
+    _apply_seed_override,
+    _binary_hans_validation,
+    _bypassed_verification_states,
+    _reuse_completed_refresh,
     _skipped_discovery_payload,
     _write_round_split_manifest,
 )
 from scripts.verify_hypotheses import _load_hypotheses as _load_verified_hypotheses
 from scripts.generate_synthetic_interventions import _retained_ids
+from src.data.hans import HANSExample
 from src.data.pipeline_split import reconstruct_five_way_split, validate_manifest
 
 
@@ -482,6 +495,12 @@ def test_confidence_safe_retention_keeps_unresolved_and_rejects_only_by_ucb():
         return {
             "hypothesis_id": hypothesis_id,
             "certified": certified,
+            "nu_hat": estimate,
+            "confidence_radius": radius,
+            "lower_bound": estimate - radius,
+            "n": 20,
+            "certification_metric": "target_failure",
+            "probe_design": {"reliable_for_lcb": True},
             "diagnostics": {
                 "target_failure": {
                     "nu_hat": estimate,
@@ -510,6 +529,47 @@ def test_confidence_safe_retention_keeps_unresolved_and_rejects_only_by_ucb():
     assert certified == ["certified"]
     assert retained == ["certified", "unresolved"]
     assert states["refuted"]["state"] == "refuted"
+
+
+def test_confidence_safe_retention_keeps_insufficient_probes_unresolved():
+    payload = {
+        "mode": "llm_main",
+        "oracle_debug": False,
+        "verification_mode": "new_controlled_generated_probes",
+        "verification_probes_training_eligible": False,
+        "certification_metric": "target_failure",
+        "tau_v": 0.5,
+        "results": [
+            {
+                "hypothesis_id": "insufficient",
+                "certified": False,
+                "nu_hat": None,
+                "confidence_radius": None,
+                "lower_bound": None,
+                "n": 0,
+                "certification_metric": "target_failure",
+                "status": "unreliable_probe_design",
+                "probe_design": {"reliable_for_lcb": False},
+                "diagnostics": {
+                    "target_failure": {
+                        "status": "insufficient_probes",
+                        "nu_hat": None,
+                        "confidence_radius": None,
+                        "lower_bound": None,
+                    }
+                },
+            }
+        ],
+    }
+
+    certified, retained, states = _retained_ids(
+        payload, retention_policy="confidence_safe"
+    )
+
+    assert certified == []
+    assert retained == ["insufficient"]
+    assert states["insufficient"]["state"] == "unresolved"
+    assert states["insufficient"]["nu_hat"] is None
 
 
 def test_confidence_safe_entropy_novelty_selection_covers_every_retained_hypothesis():
@@ -1075,3 +1135,156 @@ def test_objective_ablation_report_requires_identical_selected_ids(tmp_path):
     assert "Controlled comparison check: **pass**" in report
     assert payload["same_selected_ids_in_same_order"] is True
     assert payload["metrics"][0]["pairwise_minus_ce"] == pytest.approx(0.05)
+
+
+def test_training_early_stopping_uses_min_delta_patience_and_best_epoch():
+    config = EarlyStoppingConfig(max_epochs=8, patience=2, min_delta=0.001)
+    tracker = EarlyStoppingTracker(config)
+
+    assert tracker.observe(1, 1.0) == (True, False)
+    assert tracker.observe(2, 0.9) == (True, False)
+    assert tracker.observe(3, 0.9005) == (False, False)
+    assert tracker.observe(4, 0.901) == (False, True)
+    assert tracker.best_epoch == 2
+    assert tracker.best_loss == pytest.approx(0.9)
+
+
+def test_training_early_stopping_config_rejects_invalid_values():
+    with pytest.raises(ValueError):
+        EarlyStoppingConfig.from_mapping(
+            {
+                "max_epochs": 0,
+                "early_stopping": {
+                    "enabled": True,
+                    "patience": 2,
+                    "min_delta": 0.0,
+                },
+            }
+        )
+
+
+def test_training_binary_hans_validation_combines_non_entailment_classes():
+    examples = [
+        HANSExample("e", "p", "h", "entailment", "constituent", "case-e"),
+        HANSExample("n", "p", "h", "non-entailment", "subsequence", "case-n"),
+    ]
+    result = _binary_hans_validation(
+        [[0.8, 0.1, 0.1], [0.2, 0.5, 0.3]], examples
+    )
+
+    assert result["accuracy"] == 1.0
+    assert result["loss"] == pytest.approx(-math.log(0.8))
+    assert result["sealed_final_test_used"] is False
+
+
+def test_verification_off_retains_every_hypothesis_without_certifying():
+    states = _bypassed_verification_states([{"id": "h2"}, {"id": "h1"}])
+
+    assert set(states) == {"h1", "h2"}
+    assert all(value["state"] == "unresolved" for value in states.values())
+    assert all(value["verification_bypassed"] for value in states.values())
+    assert not any(value["certified"] for value in states.values())
+
+
+def test_closed_loop_seed_override_preserves_frozen_split():
+    config = {
+        "seed": 42,
+        "closed_loop": {"seed": 42},
+        "hans": {"split_seed": 20261011},
+        "hypothesis_generation": {
+            "seed": 42,
+            "error_scorer": {"seed": 42},
+        },
+        "verification": {"seed": 42, "label_validation_seed": 314159},
+        "synthetic_generation": {"seed": 42},
+        "synthetic_validation": {"seed": 42},
+    }
+
+    _apply_seed_override(config, 44)
+
+    assert config["hans"]["split_seed"] == 20261011
+    assert config["closed_loop"]["seed"] == 44
+    assert config["verification"]["label_validation_seed"] == 314161
+    assert config["hypothesis_generation"]["error_scorer"]["seed"] == 44
+
+
+def test_training_verification_on_off_configs_differ_only_in_switch():
+    on = load_yaml_with_extends(
+        PROJECT_ROOT / "configs/stage2_v7_early_stopping_verification_on.yaml"
+    )
+    off = load_yaml_with_extends(
+        PROJECT_ROOT / "configs/stage2_v7_early_stopping_verification_off.yaml"
+    )
+
+    assert on["training"] == off["training"]
+    assert on["training"]["batch_size"] == 4
+    assert on["training"]["gradient_accumulation_steps"] == 2
+    assert (
+        on["training"]["batch_size"]
+        * on["training"]["gradient_accumulation_steps"]
+        == 8
+    )
+    assert on["closed_loop"]["total_budget"] == 128
+    assert on["closed_loop"]["max_rounds"] == 4
+    assert on["closed_loop"]["per_round_examples"] == 32
+
+    normalized_on = copy.deepcopy(on)
+    normalized_off = copy.deepcopy(off)
+    normalized_on.pop("stage2_policy")
+    normalized_off.pop("stage2_policy")
+    normalized_on["closed_loop"].pop("verification_mode")
+    normalized_off["closed_loop"].pop("verification_mode")
+    assert normalized_on == normalized_off
+
+
+def test_verification_off_refresh_resume_requires_no_probe_artifact(tmp_path):
+    round_dir = tmp_path / "refresh" / "round_002"
+    round_dir.mkdir(parents=True)
+    adapter = "/tmp/checkpoint/round_001"
+    lifecycle = {
+        "refresh_round": 2,
+        "checkpoint_adapter": adapter,
+        "verification_mode": "off",
+        "candidate_ids": ["h1"],
+        "states": {
+            "h1": {
+                "state": "unresolved",
+                "verification_mode": "off",
+                "verification_bypassed": True,
+            }
+        },
+        "next_active_ids": ["h1"],
+        "generated_training_examples": 0,
+    }
+    (round_dir / "lifecycle.json").write_text(
+        json.dumps(lifecycle), encoding="utf-8"
+    )
+    (round_dir / "hypotheses.json").write_text(
+        json.dumps({"hypotheses": [{"id": "h1"}]}), encoding="utf-8"
+    )
+
+    reused = _reuse_completed_refresh(
+        round_dir=round_dir,
+        round_index=2,
+        adapter=adapter,
+        archive=[],
+        generate_pool=False,
+    )
+
+    assert reused is not None
+    _, active, states, additions, metadata = reused
+    assert active == ["h1"]
+    assert states["h1"]["verification_bypassed"] is True
+    assert additions == []
+    assert metadata["resumed_from_completed_artifacts"] is True
+
+
+def test_optimizer_best_snapshot_clones_cpu_step_tensor():
+    import torch
+
+    live_step = torch.tensor(4.0)
+    snapshot = _cpu_tree({"state": {0: {"step": live_step}}})
+    live_step.add_(8.0)
+
+    assert snapshot["state"][0]["step"].item() == 4.0
+    assert live_step.item() == 12.0

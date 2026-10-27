@@ -8,6 +8,13 @@ training budget is 128 examples in four rounds of 32.
 
 The canonical implementation is v7. Earlier v2--v6 runs are historical
 ablations or diagnostics and are intentionally not described in this README.
+
+A non-overwriting v7 extension adds per-round validation-loss early stopping
+and a matched hypothesis-verification ON/OFF ablation while retaining the fixed
+4 x 32 acquisition schedule. Its design, commands, artifact layout, and
+interpretation boundary are documented in
+[docs/v7_training_early_stopping_verification_ablation.md](docs/v7_training_early_stopping_verification_ablation.md).
+The original v7 config, outputs, and 65.0000% seed-42 result remain preserved.
 Their complete record is retained in [Flow.md](Flow.md). Experimental results,
 cost evidence and paper figures belong in
 [STAGE2_OVERVIEW.md](reports/stage2_seed42_overview/STAGE2_OVERVIEW.md), not in

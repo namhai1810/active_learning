@@ -1,0 +1,7 @@
+extends: stage2_v7_early_stopping_common.yaml
+
+stage2_policy: failure_targeted_verified
+
+closed_loop:
+  verification_mode: "on"
+

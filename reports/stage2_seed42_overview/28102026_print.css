@@ -1,0 +1,114 @@
+@page {
+  size: A4;
+  margin: 14mm 13mm 15mm 13mm;
+}
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  background: #ffffff;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 100%;
+  color: #1e293b;
+  background: #ffffff;
+  font-family: Inter, "Segoe UI", Arial, sans-serif;
+  font-size: 10pt;
+  line-height: 1.48;
+}
+
+h1, h2, h3 {
+  color: #0f172a;
+  break-after: avoid-page;
+}
+
+h1 {
+  margin-top: 0;
+  padding-bottom: 7pt;
+  border-bottom: 2px solid #2563eb;
+  font-size: 22pt;
+}
+
+h2 {
+  margin-top: 18pt;
+  padding-bottom: 3pt;
+  border-bottom: 1px solid #cbd5e1;
+  font-size: 15pt;
+}
+
+h3 {
+  margin-top: 12pt;
+  font-size: 12pt;
+}
+
+p, li {
+  orphans: 3;
+  widows: 3;
+}
+
+blockquote {
+  margin: 10pt 0;
+  padding: 8pt 11pt;
+  color: #334155;
+  background: #f8fafc;
+  border-left: 4px solid #3b82f6;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 10pt auto 6pt auto;
+  break-inside: avoid-page;
+}
+
+table {
+  width: 100%;
+  margin: 8pt 0 13pt 0;
+  border-collapse: collapse;
+  font-size: 7.8pt;
+  line-height: 1.28;
+}
+
+thead {
+  display: table-header-group;
+  background: #e2e8f0;
+}
+
+tr {
+  break-inside: avoid-page;
+}
+
+th, td {
+  padding: 4pt 5pt;
+  border: 1px solid #cbd5e1;
+  vertical-align: top;
+}
+
+code {
+  color: #7c2d12;
+  font-size: 0.92em;
+}
+
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Pandoc preserves Mermaid as a code block; hide it in the static PDF. */
+pre.mermaid,
+code.mermaid {
+  display: none !important;
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid #cbd5e1;
+}
+
+figure {
+  break-inside: avoid-page;

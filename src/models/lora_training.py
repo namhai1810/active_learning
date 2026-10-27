@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from src.data.mnli import MNLIExample
 from src.data.labels import MNLI_LABELS
@@ -71,6 +71,55 @@ class LoraTrainingConfig:
 
 
 @dataclass(frozen=True)
+class EarlyStoppingConfig:
+    """Validation-loss early stopping for a single stateful training call."""
+
+    max_epochs: int
+    patience: int
+    min_delta: float
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "EarlyStoppingConfig":
+        early = value.get("early_stopping")
+        if not isinstance(early, Mapping) or early.get("enabled") is not True:
+            raise ValueError("training.early_stopping.enabled must be true")
+        config = cls(
+            max_epochs=int(value.get("max_epochs", value.get("num_epochs", 1))),
+            patience=int(early.get("patience", 2)),
+            min_delta=float(early.get("min_delta", 0.0)),
+        )
+        if config.max_epochs <= 0 or config.patience <= 0:
+            raise ValueError("Early-stopping max_epochs and patience must be positive")
+        if config.min_delta < 0:
+            raise ValueError("Early-stopping min_delta must be non-negative")
+        return config
+
+
+@dataclass
+class EarlyStoppingTracker:
+    """Small deterministic state machine, kept separate for unit testing."""
+
+    config: EarlyStoppingConfig
+    best_loss: float = float("inf")
+    best_epoch: int = 0
+    bad_epochs: int = 0
+
+    def observe(self, epoch: int, validation_loss: float) -> tuple[bool, bool]:
+        import math
+
+        if epoch <= 0 or not math.isfinite(validation_loss):
+            raise ValueError("Epoch and validation loss must be positive and finite")
+        improved = validation_loss < self.best_loss - self.config.min_delta
+        if improved:
+            self.best_loss = validation_loss
+            self.best_epoch = epoch
+            self.bad_epochs = 0
+        else:
+            self.bad_epochs += 1
+        return improved, self.bad_epochs >= self.config.patience
+
+
+@dataclass(frozen=True)
 class PairwiseLossConfig:
     token_cross_entropy_weight: float = 1.0
     contrastive_weight: float = 1.0
@@ -108,6 +157,13 @@ class PairedTrainingResult:
     optimizer_state_loaded: bool = False
     optimizer_step_start: int = 0
     optimizer_step_end: int = 0
+    optimizer_step_last_attempted: int = 0
+    epochs_completed: int = 0
+    best_epoch: int | None = None
+    best_validation_loss: float | None = None
+    stopped_early: bool = False
+    validation_seconds: float = 0.0
+    epoch_history: tuple[dict[str, Any], ...] = ()
 
 
 def _optimizer_step(optimizer: Any) -> int:
@@ -128,7 +184,9 @@ def _optimizer_step(optimizer: Any) -> int:
 def _cpu_tree(value: Any) -> Any:
     """Detach tensor leaves to CPU so optimizer checkpoints are portable."""
     if hasattr(value, "detach") and hasattr(value, "cpu"):
-        return value.detach().cpu()
+        # clone() is required for CPU-resident AdamW step tensors: detach().cpu()
+        # can otherwise alias live optimizer state and mutate the best snapshot.
+        return value.detach().cpu().clone()
     if isinstance(value, dict):
         return {key: _cpu_tree(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -270,6 +328,8 @@ def _train_lora(
     pairwise_config: PairwiseLossConfig | None = None,
     optimizer_state_input: str | Path | None = None,
     optimizer_state_output: str | Path | None = None,
+    early_stopping: EarlyStoppingConfig | None = None,
+    validation_callback: Callable[[], Mapping[str, Any]] | None = None,
 ) -> PairedTrainingResult:
     """Fine-tune only LoRA parameters and save the resulting adapter."""
     if not examples:
@@ -284,6 +344,10 @@ def _train_lora(
             raise ValueError("Paired training batch_size must be positive and even")
     elif pair_types is not None:
         raise ValueError("pair_types require a pairwise loss configuration")
+    if (early_stopping is None) != (validation_callback is None):
+        raise ValueError(
+            "Early stopping requires both a configuration and validation callback"
+        )
 
     import torch
     from peft import LoraConfig, PeftModel, TaskType, get_peft_model
@@ -453,12 +517,24 @@ def _train_lora(
     contrastive_loss_count = 0
     consistency_loss_total = 0.0
     consistency_loss_count = 0
-    for epoch_index in range(config.num_epochs):
+    epoch_limit = (
+        early_stopping.max_epochs if early_stopping is not None else config.num_epochs
+    )
+    tracker = EarlyStoppingTracker(early_stopping) if early_stopping else None
+    best_parameters: list[Any] | None = None
+    best_optimizer_state: dict[str, Any] | None = None
+    epoch_history: list[dict[str, Any]] = []
+    validation_seconds = 0.0
+    stopped_early = False
+    for epoch_index in range(epoch_limit):
+        epoch_loss_start = total_loss
+        epoch_token_loss_start = token_loss_total
+        epoch_loss_count_start = loss_count
         num_batches = len(data_loader)
         batches = tqdm(
             data_loader,
             total=num_batches,
-            desc=f"LoRA training {epoch_index + 1}/{config.num_epochs}",
+            desc=f"LoRA training {epoch_index + 1}/{epoch_limit}",
             unit="batch",
             dynamic_ncols=True,
             mininterval=2.0,
@@ -597,6 +673,54 @@ def _train_lora(
                     accumulator.zero_()
                 accumulated_batches = 0
 
+        epoch_count = loss_count - epoch_loss_count_start
+        epoch_record: dict[str, Any] = {
+            "epoch": epoch_index + 1,
+            "training_loss": (total_loss - epoch_loss_start) / epoch_count,
+            "training_token_cross_entropy_loss": (
+                token_loss_total - epoch_token_loss_start
+            )
+            / epoch_count,
+            "optimizer_step_end": _optimizer_step(optimizer),
+        }
+        if tracker is not None:
+            import time
+
+            student.model.eval()
+            validation_started = time.perf_counter()
+            validation = dict(validation_callback())
+            validation_seconds += time.perf_counter() - validation_started
+            validation_loss = float(validation.get("loss", float("nan")))
+            improved, should_stop = tracker.observe(epoch_index + 1, validation_loss)
+            epoch_record["validation"] = validation
+            epoch_record["improved"] = improved
+            epoch_record["bad_epochs"] = tracker.bad_epochs
+            if improved:
+                best_parameters = [
+                    parameter.detach().cpu().clone()
+                    for parameter in trainable_parameters
+                ]
+                best_optimizer_state = _cpu_tree(optimizer.state_dict())
+            epoch_history.append(epoch_record)
+            if should_stop:
+                stopped_early = True
+                break
+            student.model.train()
+        else:
+            epoch_history.append(epoch_record)
+
+    optimizer_step_last_attempted = _optimizer_step(optimizer)
+    if tracker is not None:
+        if best_parameters is None or best_optimizer_state is None:
+            raise RuntimeError("Early stopping completed without a best checkpoint")
+        for parameter, best_value in zip(
+            trainable_parameters, best_parameters, strict=True
+        ):
+            parameter.data.copy_(
+                best_value.to(device=parameter.device, dtype=parameter.dtype)
+            )
+        optimizer.load_state_dict(best_optimizer_state)
+
     if original_use_cache is not None:
         student.model.config.use_cache = original_use_cache
     student.model.eval()
@@ -612,9 +736,21 @@ def _train_lora(
         )
         if saved_step != optimizer_step_end:
             raise RuntimeError("Saved optimizer step differs from in-memory state")
+    best_epoch = tracker.best_epoch if tracker is not None else None
+    selected_history = (
+        epoch_history[best_epoch - 1] if best_epoch is not None else None
+    )
     return PairedTrainingResult(
-        total_loss=total_loss / loss_count,
-        token_cross_entropy_loss=token_loss_total / loss_count,
+        total_loss=(
+            float(selected_history["training_loss"])
+            if selected_history is not None
+            else total_loss / loss_count
+        ),
+        token_cross_entropy_loss=(
+            float(selected_history["training_token_cross_entropy_loss"])
+            if selected_history is not None
+            else token_loss_total / loss_count
+        ),
         contrastive_loss=(
             contrastive_loss_total / contrastive_loss_count
             if contrastive_loss_count
@@ -637,6 +773,13 @@ def _train_lora(
         optimizer_state_loaded=optimizer_state_loaded,
         optimizer_step_start=optimizer_step_start,
         optimizer_step_end=optimizer_step_end,
+        optimizer_step_last_attempted=optimizer_step_last_attempted,
+        epochs_completed=len(epoch_history),
+        best_epoch=best_epoch,
+        best_validation_loss=(tracker.best_loss if tracker is not None else None),
+        stopped_early=stopped_early,
+        validation_seconds=validation_seconds,
+        epoch_history=tuple(epoch_history),
     )
 
 
@@ -672,6 +815,32 @@ def train_lora_stateful(
         seed,
         optimizer_state_input=optimizer_state_input,
         optimizer_state_output=optimizer_state_output,
+    )
+
+
+def train_lora_stateful_early_stopping(
+    student: QwenNLIStudent,
+    examples: list[MNLIExample],
+    config: LoraTrainingConfig,
+    early_stopping: EarlyStoppingConfig,
+    validation_callback: Callable[[], Mapping[str, Any]],
+    adapter_output_dir: str | Path,
+    seed: int,
+    *,
+    optimizer_state_input: str | Path | None,
+    optimizer_state_output: str | Path,
+) -> PairedTrainingResult:
+    """Train statefully and commit the best validation-loss epoch only."""
+    return _train_lora(
+        student,
+        examples,
+        config,
+        adapter_output_dir,
+        seed,
+        optimizer_state_input=optimizer_state_input,
+        optimizer_state_output=optimizer_state_output,
+        early_stopping=early_stopping,
+        validation_callback=validation_callback,
     )
 
 

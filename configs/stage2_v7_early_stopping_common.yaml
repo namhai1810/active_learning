@@ -1,0 +1,25 @@
+extends: stage2_ours_verified_v7_dual_closed_loop.yaml
+
+# Training-only extension of v7. Acquisition remains fixed at 4 x 32.
+training:
+  # Four examples per forward/backward microbatch and two accumulated
+  # microbatches give an effective batch of eight.
+  batch_size: 4
+  gradient_accumulation_steps: 2
+  max_epochs: 8
+  early_stopping:
+    enabled: true
+    patience: 2
+    min_delta: 0.001
+    metric: binary_hans_negative_log_likelihood
+    validation_source: predeclared_gain_eval_stopping_subset
+    restore_best_checkpoint: true
+
+closed_loop:
+  training_protocol: stateful_early_stopping_verification_ablation_v7
+  # These values are repeated here as protocol invariants. No adaptive
+  # acquisition or cost-aware stop is enabled by this experiment.
+  total_budget: 128
+  max_rounds: 4
+  per_round_examples: 32
+
