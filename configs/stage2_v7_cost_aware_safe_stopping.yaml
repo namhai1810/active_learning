@@ -1,0 +1,93 @@
+extends: stage2_v7_early_stopping_verification_on.yaml
+
+# Separate adaptive protocol. Historical V7 ON/OFF configs and outputs remain
+# fixed at 4 x 32 and are not modified by this file.
+stage2_policy: failure_targeted_verified
+
+closed_loop:
+  training_protocol: stateful_cost_aware_safe_stopping_v7
+  verification_mode: "on"
+  total_budget: 256
+  max_rounds: 8
+  per_round_examples: 32
+  final_hypothesis_audit: false
+
+active_learning:
+  current_round: 1
+  max_rounds: 8
+  max_budget: null
+
+# Appendix Eq. (A.1). One predeclared look avoids silently multiplying the
+# horizon beyond T=8. With K=5, T=8, delta=.05, n=120 gives a(h) ~= .183,
+# satisfying a(h) <= gamma/2 for gamma=.4 when all 120 probes are valid.
+verification:
+  delta: 0.05
+  tau_v: 0.5
+  n_probe_sets: 120
+  min_valid_probe_sets: 120
+  max_hypotheses_per_round: 5
+  max_rounds: 8
+  adaptive_verification:
+    enabled: false
+    initial_probe_sets: 120
+    increment_probe_sets: 120
+
+safe_stopping:
+  verification_margin_gamma: 0.4
+  require_mechanical_assumptions: true
+
+# Enough fresh, QC-accepted targeted pairs are requested for eight disjoint
+# 8-example pilots plus one 32-example main acquisition. QC attrition can still
+# make a hypothesis ineligible; that is logged as insufficient pilot/data.
+synthetic_generation:
+  counterfactual_pairs_per_hypothesis: 40
+  invariant_pairs_per_hypothesis: 40
+
+stage2_generation_limit_examples: 800
+stage2_min_accepted_examples: 32
+stage2_max_generated_examples: 1600
+
+pilot:
+  training_policy: stateful_early_stopping_clone
+  m: 8
+  pilot_train_size: 8
+  gain_eval_size: 16
+  seed: 42
+  applicability_seed: 42
+  max_records_per_call: 50
+  prompt_version: hypothesis_operationalization_v1
+  preserve_adapters: true
+
+gain:
+  M: 1.0
+  delta: 0.05
+  K: 5
+  T: 8
+  tolerance: 1.0e-12
+
+decision:
+  lambda_cost: 0.01
+  remaining_budget: null
+
+cost:
+  type: full_pipeline
+  currency: USD
+  rates:
+    llm_input_per_1k_tokens: 0.0002
+    llm_output_per_1k_tokens: 0.0006
+    data_generation_per_item: 0.001
+    data_verification_per_item: 0.001
+    lora_training_per_run: 0.02
+    lora_training_per_gpu_hour: 0.5
+    evaluation_per_run: 0.005
+    evaluation_per_item: 0.0001
+    evaluation_per_gpu_hour: 0.5
+  projections:
+    lora_training_gpu_seconds_fixed: 0.0
+    lora_training_gpu_seconds_per_item: 0.2
+    evaluation_gpu_seconds_fixed: 0.0
+    evaluation_gpu_seconds_per_item: 0.02
+
+intervention:
+  full_intervention_size: 32
+  seed: 42

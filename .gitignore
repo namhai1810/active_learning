@@ -14,7 +14,46 @@ test_*
 !tests/test_report_hans_baselines.py
 !tests/test_verification_probes.py
 !tests/test_hypothesis_discovery_retry.py
+!tests/test_v7_cost_aware_stopping.py
 !reports/*
 *.svg
 *.csv
 *.png
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Editor and OS metadata
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Python/tooling caches and temporary files
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+*.tmp
+*.bak
+
+# Experiment trackers and heavyweight model artifacts
+wandb/
+lightning_logs/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# Generated PDFs are reproducible; retain the mathematical source appendix.
+*.pdf
+!appendix_verified_failure_cost_aware_stopping.pdf

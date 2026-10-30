@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from dataclasses import asdict
@@ -16,8 +17,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.hans import HANSExample
+from src.data.labels import MNLI_LABELS
 from src.data.hans_split import HANS_FIVE_WAY_SPLIT_VERSION
 from src.active_learning.multiround import partition_ids_by_round
+from src.benchmark.hans_manifest import FrozenHansManifest
+from src.benchmark.stopping_subset import validate_stopping_subset_manifest
 from src.data.pipeline_split import (
     materialize_role,
     records_by_id,
@@ -28,12 +32,17 @@ from src.evaluation.hans import evaluate_hans
 from src.gain.estimation import estimate_gain
 from src.hypotheses.types import FailureHypothesis
 from src.intervention.synthetic import SyntheticPilotConfig, run_synthetic_pilots
-from src.models.lora_training import LoraTrainingConfig, train_lora
+from src.models.lora_training import (
+    EarlyStoppingConfig,
+    LoraTrainingConfig,
+    train_lora,
+    train_lora_stateful_early_stopping,
+)
 from src.models.qwen_nli import QwenNLIStudent
 from src.synthetic.types import SyntheticNLIExample
 from src.teacher import build_teacher
 from src.utils.artifacts import read_json, read_jsonl
-from src.utils.checkpoint import checkpoint_descriptor
+from src.utils.checkpoint import checkpoint_descriptor, hash_local_path
 from src.utils.config import load_yaml_with_extends, require_mapping
 from src.utils.io import write_json, write_jsonl
 from src.utils.seed import set_deterministic_seed
@@ -75,6 +84,33 @@ def _as_hans(records: Any) -> list[HANSExample]:
         )
         for record in records
     ]
+
+
+def _binary_validation(
+    probabilities: list[list[float]], examples: list[HANSExample]
+) -> dict[str, Any]:
+    if len(probabilities) != len(examples) or not examples:
+        raise ValueError("Pilot validation probabilities and examples must align")
+    losses: list[float] = []
+    correct = 0
+    for row, example in zip(probabilities, examples, strict=True):
+        if len(row) != len(MNLI_LABELS):
+            raise ValueError("Pilot validation probabilities must use MNLI order")
+        entailment = float(row[0])
+        non_entailment = float(row[1]) + float(row[2])
+        target = entailment if example.gold == "entailment" else non_entailment
+        losses.append(-math.log(max(target, 1e-12)))
+        prediction = (
+            "entailment" if entailment >= non_entailment else "non-entailment"
+        )
+        correct += int(prediction == example.gold)
+    return {
+        "loss": sum(losses) / len(losses),
+        "accuracy": correct / len(examples),
+        "num_examples": len(examples),
+        "source": "predeclared_gain_eval_stopping_subset",
+        "sealed_final_test_used": False,
+    }
 
 
 def _load_hypotheses(payload: dict[str, Any]) -> dict[str, FailureHypothesis]:
@@ -148,6 +184,18 @@ def main() -> None:
     if T < declared_rounds:
         raise ValueError("gain.T must cover active_learning.max_rounds")
     preserve_adapters = bool(pilot.get("preserve_adapters", True))
+    pilot_training_policy = str(pilot.get("training_policy", "independent_lora"))
+    if pilot_training_policy not in {
+        "independent_lora",
+        "stateful_early_stopping_clone",
+    }:
+        raise ValueError("Unsupported pilot.training_policy")
+    early_stopping = (
+        EarlyStoppingConfig.from_mapping(require_mapping(config, "training"))
+        if pilot_training_policy == "stateful_early_stopping_clone"
+        else None
+    )
+    optimizer_state_input = pilot.get("optimizer_state_path")
 
     run_dir = Path(args.run_dir)
     required = {
@@ -183,6 +231,22 @@ def main() -> None:
     if not round_gain_ids:
         raise ValueError("The configured gain_eval split is too small for max_rounds")
     gain_eval = materialize_role(indexed, round_gain_ids, "gain_eval")
+    stopping_examples: list[HANSExample] = []
+    if pilot_training_policy == "stateful_early_stopping_clone":
+        closed = require_mapping(config, "closed_loop")
+        benchmark = require_mapping(config, "stage2_benchmark")
+        frozen = FrozenHansManifest.from_mapping(
+            read_json(Path(str(benchmark["frozen_manifest_path"])))
+        )
+        subset = read_json(Path(str(closed["stopping_subset_manifest"])))
+        all_gain_rows = [indexed[item] for item in frozen.gain_eval_ids]
+        stopping_ids, _ = validate_stopping_subset_manifest(
+            subset,
+            all_gain_rows,
+            frozen.gain_eval_ids,
+            frozen_manifest_hash=frozen.manifest_hash,
+        )
+        stopping_examples = _as_hans([indexed[item] for item in stopping_ids])
     hypotheses = _load_hypotheses(read_json(required["hypotheses"]))
     verification = read_json(required["verification"])
     if (
@@ -267,9 +331,60 @@ def main() -> None:
             adapter_dir: Path,
             seed: int,
         ) -> float:
-            return train_lora(student, examples, training, adapter_dir, seed)
+            if pilot_training_policy == "independent_lora":
+                return train_lora(student, examples, training, adapter_dir, seed)
+
+            def validation_callback() -> dict[str, Any]:
+                probabilities = student.predict_proba(
+                    [item.premise for item in stopping_examples],
+                    [item.hypothesis for item in stopping_examples],
+                    batch_size=batch_size,
+                )
+                return _binary_validation(probabilities, stopping_examples)
+
+            assert early_stopping is not None
+            result = train_lora_stateful_early_stopping(
+                student,
+                examples,
+                training,
+                early_stopping,
+                validation_callback,
+                adapter_dir,
+                seed,
+                optimizer_state_input=optimizer_state_input,
+                optimizer_state_output=adapter_dir.parent / "optimizer_state.pt",
+            )
+            write_json(
+                adapter_dir.parent / "training_history.json",
+                {
+                    "best_epoch": result.best_epoch,
+                    "best_validation_loss": result.best_validation_loss,
+                    "epochs_completed": result.epochs_completed,
+                    "stopped_early": result.stopped_early,
+                    "optimizer_step_start": result.optimizer_step_start,
+                    "optimizer_step_end": result.optimizer_step_end,
+                    "optimizer_step_last_attempted": (
+                        result.optimizer_step_last_attempted
+                    ),
+                    "restore_to_best_verified": (
+                        result.optimizer_step_end
+                        <= result.optimizer_step_last_attempted
+                    ),
+                    "epochs": list(result.epoch_history),
+                },
+            )
+            return result.total_loss
 
         def risk_callback(student: QwenNLIStudent, selected: Any) -> float:
+            if pilot_training_policy == "stateful_early_stopping_clone":
+                examples = _as_hans(selected)
+                probabilities = student.predict_proba(
+                    [item.premise for item in examples],
+                    [item.hypothesis for item in examples],
+                    batch_size=batch_size,
+                )
+                accuracy = _binary_validation(probabilities, examples)["accuracy"]
+                return 1.0 - float(accuracy)
             _, metrics = evaluate_hans(
                 student, _as_hans(selected), batch_size=batch_size
             )
@@ -359,6 +474,14 @@ def main() -> None:
             "gain_eval_round_ids": list(round_gain_ids),
             "gain_eval_reused_across_rounds": False,
             "starting_checkpoint": checkpoint_before,
+            "starting_optimizer_state": {
+                "path": optimizer_state_input,
+                "local_sha256": hash_local_path(optimizer_state_input),
+            },
+            "pilot_training_policy": pilot_training_policy,
+            "main_training_policy_matched": (
+                pilot_training_policy == "stateful_early_stopping_clone"
+            ),
             "starting_checkpoint_unchanged": checkpoint_descriptor(model) == checkpoint_before,
             "adapters_preserved": preserve_adapters,
             "data_shortages": shortages,

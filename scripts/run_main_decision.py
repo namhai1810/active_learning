@@ -53,6 +53,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not expose final_test; used by the multi-round controller",
     )
+    parser.add_argument(
+        "--decision-only",
+        action="store_true",
+        help=(
+            "Freeze candidates, STOP/CONTINUE, and cost artifacts without "
+            "running the intervention; used by the stateful V7 controller"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -219,9 +227,13 @@ def main() -> None:
     used_pilot_ids = _validate_pilots(
         observations, raw_estimates, checkpoint, asdict(training)
     )
+    decision_pool = run_dir / "synthetic" / "closed_loop_eligible_pool.jsonl"
+    synthetic_source = (
+        decision_pool if decision_pool.is_file() else required["synthetic"]
+    )
     synthetic = [
         SyntheticNLIExample.from_mapping(row)
-        for row in read_jsonl(required["synthetic"], allow_empty=True)
+        for row in read_jsonl(synthetic_source, allow_empty=True)
     ]
     full_sets = {
         hypothesis_id: select_full_synthetic_examples(
@@ -328,12 +340,16 @@ def main() -> None:
             "cost_type": cost_type,
             "cost_currency": cost_config.get("currency", "examples"),
             "requested_full_intervention_size": full_size,
+            "candidate_training_source": str(synthetic_source),
             "lambda_cost": lambda_cost,
             "remaining_budget": remaining_budget,
             "incurred_exploration_cost": round_incurred_cost,
             "incurred_exploration_breakdown": round_incurred_breakdown,
             "available_projected_intervention_budget": intervention_budget,
             "candidates": [item.to_dict() for item in candidates],
+            "candidate_training_ids": {
+                key: [item.id for item in value] for key, value in full_sets.items()
+            },
         },
     )
     decision_payload = {
@@ -369,7 +385,7 @@ def main() -> None:
         }
     write_json(output_dir / "round_cost.json", round_cost_payload)
     frozen_decision = (output_dir / "decision.json").read_bytes()
-    if decision.action == "stop":
+    if decision.action == "stop" or args.decision_only:
         print(json.dumps(decision_payload, indent=2, sort_keys=True))
         return
 

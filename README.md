@@ -315,3 +315,7 @@ The full mathematical derivation, protocol evolution, incident ledger and
 historical ablations remain in [Flow.md](Flow.md). Published baseline
 implementations are documented separately in
 [src/baselines/literature/README.md](src/baselines/literature/README.md).
+
+The separate adaptive V7 extension implementing verified pilot-gain UCB and
+full-pipeline cost-aware STOP/CONTINUE is documented in
+[docs/v7_cost_aware_safe_stopping.md](docs/v7_cost_aware_safe_stopping.md).

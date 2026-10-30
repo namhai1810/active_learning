@@ -32,7 +32,12 @@ from src.data.hans import HANSExample
 from src.data.pipeline_split import manifest_payload, reconstruct_five_way_split
 from src.data.labels import MNLI_LABELS
 from src.data.mnli import load_mnli
-from src.evaluation.hans import evaluate_hans
+from src.decision.cost_model import CostUsage, compute_cost, cost_rates_from_config
+from src.decision.safe_stopping import (
+    cumulative_cost_ledger,
+    verification_assumption_audit,
+)
+from src.evaluation.hans import evaluate_hans, evaluate_hans_prediction_rules
 from src.evaluation.mnli import evaluate_mnli
 from src.models.adapter_continuity import audit_loaded_adapter
 from src.models.lora_training import (
@@ -46,7 +51,7 @@ from src.models.lora_training import (
 from src.models.qwen_nli import QwenNLIStudent
 from src.synthetic.types import SyntheticNLIExample
 from src.utils.artifacts import read_json, read_jsonl
-from src.utils.checkpoint import checkpoint_descriptor
+from src.utils.checkpoint import checkpoint_descriptor, hash_local_path
 from src.utils.config import load_yaml_with_extends, require_mapping
 from src.utils.io import _atomic_text_write, write_json, write_jsonl
 from src.utils.seed import set_deterministic_seed
@@ -83,10 +88,20 @@ def _apply_seed_override(config: dict[str, Any], seed: int) -> None:
         "verification",
         "synthetic_generation",
         "synthetic_validation",
+        "pilot",
+        "intervention",
     ):
         section = config.get(section_name)
         if isinstance(section, dict) and "seed" in section:
             section["seed"] = seed
+        if (
+            section_name == "pilot"
+            and isinstance(section, dict)
+            and "applicability_seed" in section
+        ):
+            section["applicability_seed"] = (
+                int(section["applicability_seed"]) + delta
+            )
     scorer = config.get("hypothesis_generation", {}).get("error_scorer")
     if isinstance(scorer, dict) and "seed" in scorer:
         scorer["seed"] = seed
@@ -235,7 +250,7 @@ def _write_yaml(path: Path, value: dict[str, Any]) -> None:
     _atomic_text_write(path, yaml.safe_dump(value, sort_keys=False))
 
 
-def _run_stage(script: str, config: Path, run_dir: Path) -> None:
+def _run_stage(script: str, config: Path, run_dir: Path, *extra: str) -> None:
     subprocess.run(
         [
             sys.executable,
@@ -244,6 +259,7 @@ def _run_stage(script: str, config: Path, run_dir: Path) -> None:
             str(config),
             "--run-dir",
             str(run_dir),
+            *extra,
         ],
         cwd=PROJECT_ROOT,
         check=True,
@@ -336,6 +352,23 @@ def _round_config(
     scorer = config.get("hypothesis_generation", {}).get("error_scorer")
     if isinstance(scorer, dict) and "seed" in scorer:
         scorer["seed"] = int(scorer["seed"]) + round_index - 1
+    closed = require_mapping(config, "closed_loop")
+    if (
+        closed.get("training_protocol")
+        == "stateful_cost_aware_safe_stopping_v7"
+    ):
+        maximum = int(closed["max_rounds"])
+        active = config.setdefault("active_learning", {})
+        active["current_round"] = round_index
+        active["max_rounds"] = maximum
+        require_mapping(config, "gain")["T"] = maximum
+        require_mapping(config, "verification")["max_rounds"] = maximum
+        for section in ("pilot", "intervention"):
+            value = config.get(section)
+            if isinstance(value, dict):
+                for key in ("seed", "applicability_seed"):
+                    if key in value:
+                        value[key] = int(value[key]) + round_index - 1
     return config
 
 
@@ -403,6 +436,8 @@ def _reuse_completed_refresh(
     adapter: str | None,
     archive: list[dict[str, Any]],
     generate_pool: bool,
+    optimizer_state: str | None = None,
+    validate_optimizer_state: bool = False,
 ) -> tuple[
     list[dict[str, Any]],
     list[str],
@@ -450,6 +485,13 @@ def _reuse_completed_refresh(
         raise ValueError(
             "Cached refresh was generated from a different checkpoint adapter"
         )
+    if (
+        validate_optimizer_state
+        and lifecycle.get("checkpoint_optimizer_state") != optimizer_state
+    ):
+        raise ValueError(
+            "Cached refresh was generated from a different optimizer state"
+        )
     hypothesis_payload = read_json(round_dir / "hypotheses.json")
     candidates = [dict(item) for item in hypothesis_payload["hypotheses"]]
     candidate_ids = [str(item["id"]) for item in candidates]
@@ -495,6 +537,7 @@ def _refresh_hypotheses(
     active_ids: list[str],
     generate_pool: bool,
     reuse_completed: bool = False,
+    optimizer_state: str | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     list[str],
@@ -508,18 +551,29 @@ def _refresh_hypotheses(
         raise ValueError("closed_loop.verification_mode must be on or off")
     round_dir = output / "refresh" / f"round_{round_index:03d}"
     if reuse_completed and round_dir.exists():
+        cost_aware = (
+            closed.get("training_protocol")
+            == "stateful_cost_aware_safe_stopping_v7"
+        )
         reused = _reuse_completed_refresh(
             round_dir=round_dir,
             round_index=round_index,
             adapter=adapter,
             archive=archive,
             generate_pool=generate_pool,
+            optimizer_state=optimizer_state,
+            validate_optimizer_state=cost_aware,
         )
         if reused is not None:
             print(f"[RESUME] Reusing completed refresh artifacts for round {round_index}")
             return reused
     round_dir.mkdir(parents=True)
     config = _round_config(base_config, round_index=round_index, adapter=adapter)
+    if (
+        require_mapping(config, "closed_loop").get("training_protocol")
+        == "stateful_cost_aware_safe_stopping_v7"
+    ):
+        require_mapping(config, "pilot")["optimizer_state_path"] = optimizer_state
     config_path = round_dir / "config.yaml"
     _write_yaml(config_path, config)
     predictions, discovery_errors = _prepare_current_predictions(
@@ -593,6 +647,7 @@ def _refresh_hypotheses(
     lifecycle = {
         "refresh_round": round_index,
         "checkpoint_adapter": adapter,
+        "checkpoint_optimizer_state": optimizer_state,
         "discovery_errors": discovery_errors,
         "proposal_capacity_before_verification": proposal_capacity,
         "novel_search_performed": novel_search_performed,
@@ -611,6 +666,125 @@ def _refresh_hypotheses(
     }
     write_json(round_dir / "lifecycle.json", lifecycle)
     return next_archive, next_active, states, additions, lifecycle
+
+
+def _cost_aware_decision(
+    *,
+    round_dir: Path,
+    config_path: Path,
+    config: dict[str, Any],
+    resume: bool,
+    expected_checkpoint: dict[str, Any],
+    expected_optimizer_state: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], dict[str, Any], dict[str, Any]]:
+    """Freeze or safely reuse pilot-gain and STOP/CONTINUE artifacts."""
+    gain_paths = (
+        round_dir / "gain" / "gain_estimates.json",
+        round_dir / "gain" / "pilot_observations.jsonl",
+        round_dir / "gain" / "gain_eval_applicability.json",
+    )
+    gain_presence = [path.is_file() for path in gain_paths]
+    if all(gain_presence):
+        if not resume:
+            raise FileExistsError(
+                f"Cost-aware gain artifacts already exist: {round_dir}"
+            )
+    elif any(gain_presence):
+        raise RuntimeError(
+            "Cannot safely resume partially materialized pilot-gain artifacts: "
+            f"{[str(path) for path, exists in zip(gain_paths, gain_presence) if not exists]}"
+        )
+    else:
+        _run_stage("run_main_pilot_gain.py", config_path, round_dir)
+
+    decision_paths = (
+        round_dir / "decision" / "decision.json",
+        round_dir / "decision" / "candidates.json",
+        round_dir / "decision" / "round_cost.json",
+    )
+    decision_presence = [path.is_file() for path in decision_paths]
+    if all(decision_presence):
+        if not resume:
+            raise FileExistsError(f"Cost-aware decision already exists: {round_dir}")
+    elif any(decision_presence):
+        raise RuntimeError(
+            "Cannot safely resume partially frozen cost-aware decision artifacts: "
+            f"{[str(path) for path, exists in zip(decision_paths, decision_presence) if not exists]}"
+        )
+    else:
+        _run_stage(
+            "run_main_decision.py",
+            config_path,
+            round_dir,
+            "--decision-only",
+            "--defer-final-test",
+        )
+
+    gain_payload = read_json(gain_paths[0])
+    if gain_payload.get("starting_checkpoint") != expected_checkpoint:
+        raise ValueError(
+            "Pilot-gain checkpoint differs from the current V7 checkpoint"
+        )
+    if gain_payload.get("starting_optimizer_state") != expected_optimizer_state:
+        raise ValueError(
+            "Pilot-gain optimizer state differs from the current V7 optimizer"
+        )
+    if gain_payload.get("main_training_policy_matched") is not True:
+        raise ValueError(
+            "Pilot gain did not use the stateful V7 early-stopping policy"
+        )
+    verification_payload = read_json(round_dir / "verification" / "results.json")
+    gain_config = require_mapping(config, "gain")
+    safe_config = require_mapping(config, "safe_stopping")
+    expected_K = int(gain_config["K"])
+    expected_T = int(gain_config["T"])
+    expected_delta = float(gain_config["delta"])
+    gain_bound = gain_payload.get("gain_bound")
+    if not isinstance(gain_bound, dict) or any(
+        gain_bound.get(key) != value
+        for key, value in {
+            "K": expected_K,
+            "T": expected_T,
+            "delta": expected_delta,
+        }.items()
+    ):
+        raise ValueError("Pilot-gain confidence accounting differs from K/T/delta")
+    assumption_audit = verification_assumption_audit(
+        verification_payload,
+        gamma=float(safe_config["verification_margin_gamma"]),
+        expected_K=expected_K,
+        expected_T=expected_T,
+        expected_delta=float(require_mapping(config, "verification")["delta"]),
+    )
+    if (
+        bool(safe_config.get("require_mechanical_assumptions", True))
+        and not assumption_audit["mechanical_checks_pass"]
+    ):
+        raise RuntimeError(
+            "Appendix mechanical assumptions failed; refusing to freeze a "
+            "safe-stopping decision"
+        )
+    write_json(
+        round_dir / "decision" / "theorem_assumption_audit.json",
+        assumption_audit,
+    )
+
+    decision = read_json(decision_paths[0])
+    candidates = read_json(decision_paths[1])
+    cost = read_json(decision_paths[2])
+    observations = read_jsonl(gain_paths[1], allow_empty=True)
+    selected_hypothesis = decision.get("selected_hypothesis_id")
+    excluded_ids = [
+        str(item)
+        for row in observations
+        if row.get("hypothesis_id") == selected_hypothesis
+        for item in row.get("train_ids", [])
+    ]
+    return decision, excluded_ids, candidates, {
+        **cost,
+        "theorem_assumption_audit": assumption_audit,
+        "gain_estimates": gain_payload,
+    }
 
 
 def _metrics_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -636,12 +810,13 @@ def _optimizer_steps_for_examples(
 def _evaluate_checkpoint(
     *,
     model: dict[str, Any],
-    adapter: str,
+    adapter: str | None,
     gain_rows: list[dict[str, Any]],
     final_rows: list[dict[str, Any]],
     mnli_config: dict[str, Any],
     output: Path,
     audit_adapter: bool,
+    report_both_hans_rules: bool = False,
 ) -> dict[str, Any]:
     """Evaluate one final branch and keep its predictions fully separate."""
     output.mkdir(parents=True, exist_ok=True)
@@ -655,11 +830,20 @@ def _evaluate_checkpoint(
         batch_size=int(model.get("batch_size", 4)),
     )
     write_jsonl(output / "gain_report_predictions.jsonl", gain_predictions)
-    final_predictions, hans_metrics = evaluate_hans(
-        student,
-        _hans(final_rows),
-        batch_size=int(model.get("batch_size", 4)),
-    )
+    prediction_rule_metrics = None
+    if report_both_hans_rules:
+        final_predictions, prediction_rule_metrics = evaluate_hans_prediction_rules(
+            student,
+            _hans(final_rows),
+            batch_size=int(model.get("batch_size", 4)),
+        )
+        hans_metrics = prediction_rule_metrics["three_way_to_binary"]
+    else:
+        final_predictions, hans_metrics = evaluate_hans(
+            student,
+            _hans(final_rows),
+            batch_size=int(model.get("batch_size", 4)),
+        )
     write_jsonl(output / "hans_final_predictions.jsonl", final_predictions)
     mnli_metrics: dict[str, Any] = {}
     for name, split in (
@@ -684,6 +868,7 @@ def _evaluate_checkpoint(
     _clear_cuda_cache()
     return {
         "hans_final": hans_metrics,
+        "hans_final_prediction_rules": prediction_rule_metrics,
         "gain_report": gain_metrics,
         "mnli": mnli_metrics,
         "adapter_load_audit": load_audit,
@@ -715,16 +900,23 @@ def main() -> None:
         "legacy_independent_rounds_v6",
         "dual_fair_continuation_and_consolidation_v7",
         "stateful_early_stopping_verification_ablation_v7",
+        "stateful_cost_aware_safe_stopping_v7",
     }:
         raise ValueError(f"Unsupported closed-loop training protocol: {training_protocol}")
     dual_v7 = training_protocol == "dual_fair_continuation_and_consolidation_v7"
-    early_stop_v7 = (
+    fixed_budget_early_stop_v7 = (
         training_protocol == "stateful_early_stopping_verification_ablation_v7"
     )
+    cost_aware_v7 = training_protocol == "stateful_cost_aware_safe_stopping_v7"
+    early_stop_v7 = fixed_budget_early_stop_v7 or cost_aware_v7
     stateful_training = dual_v7 or early_stop_v7
     verification_mode = str(closed.get("verification_mode", "on"))
     if verification_mode not in {"on", "off"}:
         raise ValueError("closed_loop.verification_mode must be on or off")
+    if cost_aware_v7 and verification_mode != "on":
+        raise ValueError(
+            "Verified-failure safe stopping requires verification_mode: on"
+        )
     expected_policy = (
         "failure_targeted_verified"
         if verification_mode == "on"
@@ -736,6 +928,16 @@ def main() -> None:
         )
     if total_budget != per_round * max_rounds or per_round % 2:
         raise ValueError("Closed-loop budget must equal max_rounds * even per-round size")
+    if cost_aware_v7:
+        require_mapping(config, "active_learning")
+        require_mapping(config, "pilot")
+        require_mapping(config, "gain")
+        require_mapping(config, "decision")
+        require_mapping(config, "cost")
+        require_mapping(config, "intervention")
+        require_mapping(config, "safe_stopping")
+        if max_rounds != 8 or per_round != 32 or total_budget != 256:
+            raise ValueError("Cost-aware V7 protocol is fixed to at most 8 x 32")
     set_deterministic_seed(seed)
 
     output = Path(args.output_dir).resolve()
@@ -818,6 +1020,8 @@ def main() -> None:
     selected_rows: list[dict[str, Any]] = []
     cumulative_hypothesis_counts: Counter[str] = Counter()
     round_records: list[dict[str, Any]] = []
+    cumulative_modeled_cost = 0.0
+    cost_aware_stop_record: dict[str, Any] | None = None
     stop_reason = "maximum_budget_reached"
     start_round = 1
 
@@ -830,7 +1034,12 @@ def main() -> None:
         )
     resume_from_initialization = args.resume and not any(resume_log_presence)
     if resume_from_initialization:
-        unexpected = [path for path in output.iterdir() if path.name != "config.yaml"]
+        unexpected = [
+            path
+            for path in output.iterdir()
+            if path.name != "config.yaml"
+            and not (cost_aware_v7 and path.name == "refresh")
+        ]
         if unexpected:
             raise RuntimeError(
                 "Cannot restart a pre-round resume with unexpected artifacts: "
@@ -890,6 +1099,14 @@ def main() -> None:
             }
             for item in round_records
         )
+        if cost_aware_v7:
+            last_cost = last_record.get("cost_aware")
+            if not isinstance(last_cost, dict):
+                raise ValueError("Cost-aware resume round has no cost ledger")
+            ledger = last_cost.get("cost_ledger")
+            if not isinstance(ledger, dict):
+                raise ValueError("Cost-aware resume round has an invalid cost ledger")
+            cumulative_modeled_cost = float(ledger["cumulative_after"])
         # Replay only completed refresh metadata to restore the hypothesis and
         # pool state. No teacher/model work is repeated here.
         for replay_round in range(2, len(round_records) + 1):
@@ -920,9 +1137,14 @@ def main() -> None:
 
     for round_index in range(start_round, max_rounds + 1):
         refresh_record: dict[str, Any] | None = None
+        cost_decision: dict[str, Any] | None = None
+        cost_candidates: dict[str, Any] | None = None
+        cost_payload: dict[str, Any] | None = None
+        pilot_excluded_ids: list[str] = []
+        cost_decision_seconds = 0.0
         refresh_seconds = 0.0
         refresh_teacher_usage = _teacher_usage(output / "refresh" / f"round_{round_index:03d}")
-        if round_index > 1:
+        if round_index > 1 or cost_aware_v7:
             refresh_started = time.perf_counter()
             archive, active_ids, states, additions, refresh_record = _refresh_hypotheses(
                 output=output,
@@ -935,6 +1157,7 @@ def main() -> None:
                 active_ids=active_ids,
                 generate_pool=True,
                 reuse_completed=args.resume,
+                optimizer_state=current_optimizer_state,
             )
             pool, pool_merge = _merge_pool(
                 pool,
@@ -955,12 +1178,81 @@ def main() -> None:
             )
             break
 
+        if cost_aware_v7:
+            refresh_dir = output / "refresh" / f"round_{round_index:03d}"
+            write_jsonl(
+                refresh_dir / "synthetic" / "closed_loop_eligible_pool.jsonl",
+                [
+                    item.to_dict()
+                    for item in pool
+                    if item.hypothesis_id in set(active_ids)
+                ],
+            )
+            decision_started = time.perf_counter()
+            cost_decision, pilot_excluded_ids, cost_candidates, cost_payload = (
+                _cost_aware_decision(
+                    round_dir=refresh_dir,
+                    config_path=refresh_dir / "config.yaml",
+                    config=_round_config(
+                        config, round_index=round_index, adapter=current_adapter
+                    ),
+                    resume=args.resume,
+                    expected_checkpoint=checkpoint_descriptor(
+                        {**model, "adapter_path": current_adapter}
+                    ),
+                    expected_optimizer_state={
+                        "path": current_optimizer_state,
+                        "local_sha256": hash_local_path(current_optimizer_state),
+                    },
+                )
+            )
+            cost_decision_seconds = time.perf_counter() - decision_started
+            refresh_teacher_usage = _teacher_usage(refresh_dir)
+            if cost_decision.get("action") == "stop":
+                incurred = float(cost_payload["incurred_exploration_cost"])
+                ledger = cumulative_cost_ledger(
+                    cumulative_modeled_cost,
+                    incurred_exploration=incurred,
+                    realized_intervention=0.0,
+                )
+                cumulative_modeled_cost = ledger["cumulative_after"]
+                stop_reason = str(cost_decision.get("reason", "cost_aware_stop"))
+                cost_aware_stop_record = {
+                    "round": round_index,
+                    "cumulative_examples": len(selected_ids),
+                    "starting_checkpoint": checkpoint_descriptor(
+                        {**model, "adapter_path": current_adapter}
+                    ),
+                    "decision": cost_decision,
+                    "candidates": cost_candidates,
+                    "cost": cost_payload,
+                    "cost_ledger": ledger,
+                    "resource_usage": {
+                        "refresh_wall_seconds": refresh_seconds,
+                        "pilot_and_decision_wall_seconds": cost_decision_seconds,
+                        "teacher": refresh_teacher_usage,
+                    },
+                    "stop_reason": stop_reason,
+                    "checkpoint_unchanged": True,
+                }
+                write_json(output / "cost_aware_stop.json", cost_aware_stop_record)
+                break
+
         selected_set = set(selected_ids)
-        eligible = [
-            item
-            for item in pool
-            if item.hypothesis_id in set(active_ids) or item.id in selected_set
-        ]
+        if cost_aware_v7:
+            assert cost_decision is not None
+            selected_hypothesis = str(cost_decision["selected_hypothesis_id"])
+            eligible = [
+                item for item in pool if item.hypothesis_id == selected_hypothesis
+            ]
+            acquisition_excluded_ids = [*selected_ids, *pilot_excluded_ids]
+        else:
+            eligible = [
+                item
+                for item in pool
+                if item.hypothesis_id in set(active_ids) or item.id in selected_set
+            ]
+            acquisition_excluded_ids = selected_ids
         starting_adapter = current_adapter
         student = _student(model, current_adapter)
         starting_adapter_audit = (
@@ -1008,7 +1300,7 @@ def main() -> None:
             entropy_scores=entropy,
             embeddings={item.id: vectors[index] for index, item in enumerate(eligible)},
             verification_evidence=evidence,
-            excluded_ids=selected_ids,
+            excluded_ids=acquisition_excluded_ids,
             prior_hypothesis_pair_counts=cumulative_hypothesis_counts,
             nll_weight=float(selection.get("nll_weight", 0.65)),
             entropy_weight=float(selection.get("entropy_weight", 0.35)),
@@ -1143,6 +1435,65 @@ def main() -> None:
             item.hypothesis_id for item in acquired if item.pair_member == "base"
         )
         learning_curve.append({"round": round_index, "metrics": stopping_metrics})
+        cost_aware_round: dict[str, Any] | None = None
+        if cost_aware_v7:
+            assert cost_decision is not None
+            assert cost_candidates is not None
+            assert cost_payload is not None
+            assert stateful_result is not None
+            rates, currency = cost_rates_from_config(
+                require_mapping(config, "cost")
+            )
+            validation_passes = len(stateful_result.epoch_history)
+            realized_intervention = compute_cost(
+                CostUsage(
+                    lora_training_runs=1,
+                    lora_training_gpu_seconds=max(
+                        0.0, training_seconds - stateful_result.validation_seconds
+                    ),
+                    evaluation_runs=validation_passes + 3,
+                    evaluation_items=(
+                        2 * len(eligible)
+                        + (validation_passes + 1) * len(stopping_examples)
+                    ),
+                    evaluation_gpu_seconds=(
+                        acquisition_seconds
+                        + stateful_result.validation_seconds
+                        + stopping_seconds
+                    ),
+                ),
+                rates,
+                currency=currency,
+            ).to_dict()
+            ledger = cumulative_cost_ledger(
+                cumulative_modeled_cost,
+                incurred_exploration=float(
+                    cost_payload["incurred_exploration_cost"]
+                ),
+                realized_intervention=float(realized_intervention["total"]),
+            )
+            cumulative_modeled_cost = ledger["cumulative_after"]
+            cost_aware_round = {
+                "decision": cost_decision,
+                "candidates": cost_candidates,
+                "gain_estimates": cost_payload["gain_estimates"],
+                "theorem_assumption_audit": cost_payload[
+                    "theorem_assumption_audit"
+                ],
+                "cost_at_decision": {
+                    key: value
+                    for key, value in cost_payload.items()
+                    if key not in {"gain_estimates", "theorem_assumption_audit"}
+                },
+                "realized_intervention_cost": realized_intervention,
+                "cost_ledger": ledger,
+                "pilot_training_ids_excluded_from_main_acquisition": (
+                    pilot_excluded_ids
+                ),
+                "selected_hypothesis_id": cost_decision[
+                    "selected_hypothesis_id"
+                ],
+            }
         record = {
             "round": round_index,
             "requested_examples": per_round,
@@ -1211,6 +1562,9 @@ def main() -> None:
                     else 0.0
                 ),
                 "stopping_evaluation_gpu_wall_seconds": stopping_seconds,
+                "cost_aware_pilot_and_decision_wall_seconds": (
+                    cost_decision_seconds
+                ),
                 "teacher": refresh_teacher_usage,
             },
             "wall_clock_seconds_training_and_stopping_eval": elapsed,
@@ -1221,6 +1575,7 @@ def main() -> None:
             "verification_refresh": refresh_record,
             "selection": diagnostics,
             "stopping_metrics": stopping_metrics,
+            "cost_aware": cost_aware_round,
         }
         round_records.append(record)
         if stateful_result is not None:
@@ -1242,7 +1597,7 @@ def main() -> None:
         write_jsonl(output / "rounds.jsonl", round_records)
         write_jsonl(output / "selected_training_examples.jsonl", selected_rows)
 
-    if early_stop_v7 and (
+    if fixed_budget_early_stop_v7 and (
         len(round_records) != max_rounds or len(selected_ids) != total_budget
     ):
         raise RuntimeError(
@@ -1260,7 +1615,11 @@ def main() -> None:
         "teacher_wall_clock_seconds": 0.0,
         "calls": 0.0,
     }
-    if bool(closed.get("final_hypothesis_audit", True)) and current_adapter:
+    if (
+        not cost_aware_v7
+        and bool(closed.get("final_hypothesis_audit", True))
+        and current_adapter
+    ):
         final_audit_started = time.perf_counter()
         archive, final_active, final_states, _, final_audit = _refresh_hypotheses(
             output=output,
@@ -1301,17 +1660,22 @@ def main() -> None:
     write_json(output / "hypothesis_archive.json", {"hypotheses": archive})
 
     if early_stop_v7:
-        if current_adapter is None or not round_records:
+        if fixed_budget_early_stop_v7 and (
+            current_adapter is None or not round_records
+        ):
             raise RuntimeError("Early-stopping v7 produced no continuation checkpoint")
+        if cost_aware_v7 and cost_aware_stop_record is None:
+            stop_reason = "maximum_rounds_reached"
         evaluation_started = time.perf_counter()
         evaluation = _evaluate_checkpoint(
             model=model,
-            adapter=str(current_adapter),
+            adapter=current_adapter,
             gain_rows=gain_report_rows,
             final_rows=final_rows,
             mnli_config=mnli_config,
             output=output,
-            audit_adapter=True,
+            audit_adapter=current_adapter is not None,
+            report_both_hans_rules=cost_aware_v7,
         )
         final_evaluation_seconds = time.perf_counter() - evaluation_started
         teacher_totals = dict(final_audit_teacher_usage)
@@ -1321,6 +1685,7 @@ def main() -> None:
             "training_gpu_wall_seconds": 0.0,
             "validation_gpu_wall_seconds": 0.0,
             "stopping_evaluation_gpu_wall_seconds": 0.0,
+            "cost_aware_pilot_and_decision_wall_seconds": 0.0,
             "final_evaluation_gpu_wall_seconds": final_evaluation_seconds,
         }
         for row in round_records:
@@ -1331,10 +1696,21 @@ def main() -> None:
                 "training_gpu_wall_seconds",
                 "validation_gpu_wall_seconds",
                 "stopping_evaluation_gpu_wall_seconds",
+                "cost_aware_pilot_and_decision_wall_seconds",
             ):
                 resource_totals[key] += float(usage[key])
             for key in teacher_totals:
                 teacher_totals[key] += float(usage["teacher"][key])
+        if cost_aware_stop_record is not None:
+            stop_usage = cost_aware_stop_record["resource_usage"]
+            resource_totals["refresh_wall_seconds"] += float(
+                stop_usage["refresh_wall_seconds"]
+            )
+            resource_totals[
+                "cost_aware_pilot_and_decision_wall_seconds"
+            ] += float(stop_usage["pilot_and_decision_wall_seconds"])
+            for key in teacher_totals:
+                teacher_totals[key] += float(stop_usage["teacher"][key])
         resource_totals["teacher"] = teacher_totals
         resource_totals["scope"] = (
             "current_ablation_run_only_shared_initial_pool_cost_excluded"
@@ -1344,21 +1720,39 @@ def main() -> None:
         )
         fixed_budget_comparable = len(selected_ids) == total_budget
         result = {
-            "method": f"ours_v7_early_stop_verification_{verification_mode}",
-            "experiment": "verification_on_off_ablation",
+            "method": (
+                "ours_v7_cost_aware_safe_stopping"
+                if cost_aware_v7
+                else f"ours_v7_early_stop_verification_{verification_mode}"
+            ),
+            "experiment": (
+                "v7_cost_aware_safe_stopping"
+                if cost_aware_v7
+                else "verification_on_off_ablation"
+            ),
             "seed": seed,
             "budget": total_budget,
             "requested_budget": total_budget,
             "rounds": len(round_records),
+            "rounds_attempted": (
+                len(round_records)
+                + (1 if cost_aware_stop_record is not None else 0)
+            ),
             "per_round_examples": per_round,
             "actual_training_examples": len(selected_ids),
             "fixed_budget_comparable": fixed_budget_comparable,
-            "final_metrics_reportable": fixed_budget_comparable,
+            "final_metrics_reportable": (
+                True if cost_aware_v7 else fixed_budget_comparable
+            ),
             "verification_mode": verification_mode,
-            "verification_is_only_ablation_variable": True,
+            "verification_is_only_ablation_variable": not cost_aware_v7,
             "synthetic_qc_enabled": True,
-            "acquisition_stopping": "disabled_fixed_4x32",
-            "cost_aware_stopping": False,
+            "acquisition_stopping": (
+                "gain_ucb_minus_lambda_cost_up_to_8x32"
+                if cost_aware_v7
+                else "disabled_fixed_4x32"
+            ),
+            "cost_aware_stopping": cost_aware_v7,
             "training_objective": "per_example_causal_lm_cross_entropy",
             "training_policy": {
                 "stateful_lora": True,
@@ -1376,7 +1770,10 @@ def main() -> None:
                 "restore_best_checkpoint": True,
             },
             "protocol": (
-                "discover_verify_or_bypass_generate_qc_select_"
+                "discover_verify_generate_qc_pilot_gain_ucb_cost_decide_"
+                "select_stateful_train_early_stop_refresh_v7"
+                if cost_aware_v7
+                else "discover_verify_or_bypass_generate_qc_select_"
                 "stateful_train_early_stop_refresh_v7"
             ),
             "stop_reason": stop_reason,
@@ -1404,6 +1801,9 @@ def main() -> None:
                 {**model, "adapter_path": current_adapter}
             ),
             "hans_final": evaluation["hans_final"],
+            "hans_final_prediction_rules": evaluation[
+                "hans_final_prediction_rules"
+            ],
             "gain_report": evaluation["gain_report"],
             "mnli": evaluation["mnli"],
             "learning_curve": learning_curve,
@@ -1425,6 +1825,15 @@ def main() -> None:
                 for row in round_records
             ],
             "final_hypothesis_audit": final_audit,
+            "cost_aware_rounds": (
+                [row["cost_aware"] for row in round_records]
+                if cost_aware_v7
+                else None
+            ),
+            "cost_aware_stop_record": cost_aware_stop_record,
+            "total_modeled_adaptive_cost": (
+                cumulative_modeled_cost if cost_aware_v7 else None
+            ),
             "resource_usage": resource_totals,
             "sealed_final_test_policy": {
                 "used_for_early_stopping": False,
@@ -1435,26 +1844,51 @@ def main() -> None:
             "leakage_audit": leakage,
         }
         write_json(output / "result.json", result)
+        rule_metrics = evaluation["hans_final_prediction_rules"]
         lines = [
-            "# V7 training early stopping + verification ablation",
+            (
+                "# V7 cost-aware safe stopping"
+                if cost_aware_v7
+                else "# V7 training early stopping + verification ablation"
+            ),
             "",
             f"- Verification: {verification_mode.upper()}",
             f"- Seed: {seed}",
-            f"- Fixed acquisition: {len(round_records)} x {per_round} = {len(selected_ids)} examples",
+            f"- Acquisition: {len(round_records)} x {per_round} = {len(selected_ids)} examples (maximum {total_budget})",
             f"- Effective batch: {training.batch_size * training.gradient_accumulation_steps}",
             f"- Committed AdamW steps: {committed_optimizer_step}",
             f"- HANS final accuracy: {float(evaluation['hans_final']['overall_accuracy']):.6f}",
+            *(
+                [
+                    "- HANS Direct Binary accuracy: "
+                    f"{float(rule_metrics['direct_binary']['overall_accuracy']):.6f}",
+                    f"- Modeled adaptive cost: {cumulative_modeled_cost:.6f}",
+                    f"- Stop reason: {stop_reason}",
+                ]
+                if cost_aware_v7 and rule_metrics is not None
+                else []
+            ),
             f"- MNLI matched/mismatched: {float(evaluation['mnli']['matched']['accuracy']):.6f} / {float(evaluation['mnli']['mismatched']['accuracy']):.6f}",
             "",
             "Training early stopping uses only the predeclared gain-eval stopping subset.",
             "The sealed HANS final test and MNLI validation are evaluated only after training.",
         ]
         _atomic_text_write(
-            output / "V7_EARLY_STOP_ABLATION.md", "\n".join(lines) + "\n"
+            output
+            / (
+                "V7_COST_AWARE_STOPPING.md"
+                if cost_aware_v7
+                else "V7_EARLY_STOP_ABLATION.md"
+            ),
+            "\n".join(lines) + "\n",
         )
         _atomic_text_write(
             output / ".complete",
-            f"v7 early-stop verification-{verification_mode} complete\n",
+            (
+                "v7 cost-aware safe stopping complete\n"
+                if cost_aware_v7
+                else f"v7 early-stop verification-{verification_mode} complete\n"
+            ),
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return
