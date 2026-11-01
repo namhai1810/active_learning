@@ -1,0 +1,55 @@
+extends: stage2_v7_early_stopping_verification_on.yaml
+
+# Preserve the proven V7 ON flow and training policy. Round 1 is mandatory;
+# only rounds 2-8 receive the mixed-policy Cost-Aware decision gate.
+closed_loop:
+  total_budget: 256
+  max_rounds: 8
+  per_round_examples: 32
+  final_hypothesis_audit: true
+
+# Seven refresh/decision rounds (2-8), one final audit, and one reserved family.
+# Adaptive verification still has its inherited two-look [20, 30] schedule.
+verification:
+  max_rounds: 9
+
+cost_aware:
+  enabled: true
+  decision_scope: exact_v7_mixed_soft_pair_round_action
+  start_round: 2
+
+  # Historical pilot defaults from configs/main_pilot_gain.yaml. They are
+  # predeclared here; no HANS/MNLI final result is used to tune them.
+  required_pilots: 4
+  pilot_eval_size: 64
+  pilot_seed: 42
+  preserve_pilot_adapters: false
+
+  # The mixed selector is one policy action, hence K=1 and T=7 decisions.
+  # Gain is binary validation-risk reduction in [-1, 1].
+  M: 1.0
+  delta: 0.05
+  K: 1
+  T: 7
+
+  # Historical predeclared scale from configs/main_cost_aware.yaml. This is
+  # intentionally not calibrated against seed-42 or final-test outcomes.
+  lambda_cost: 0.001
+  cost:
+    type: full_pipeline
+    currency: USD
+    rates:
+      llm_input_per_1k_tokens: 0.0002
+      llm_output_per_1k_tokens: 0.0006
+      data_generation_per_item: 0.001
+      data_verification_per_item: 0.001
+      lora_training_per_run: 0.02
+      lora_training_per_gpu_hour: 0.5
+      evaluation_per_run: 0.005
+      evaluation_per_item: 0.0001
+      evaluation_per_gpu_hour: 0.5
+    projections:
+      lora_training_gpu_seconds_fixed: 0.0
+      lora_training_gpu_seconds_per_item: 0.2
+      evaluation_gpu_seconds_fixed: 0.0
+      evaluation_gpu_seconds_per_item: 0.02

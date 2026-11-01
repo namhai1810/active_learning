@@ -14,6 +14,7 @@ test_*
 !tests/test_report_hans_baselines.py
 !tests/test_verification_probes.py
 !tests/test_hypothesis_discovery_retry.py
+!tests/test_v7_minimal_cost_aware.py
 !reports/*
 *.svg
 *.csv

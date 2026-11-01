@@ -20,6 +20,13 @@ cost evidence and paper figures belong in
 [STAGE2_OVERVIEW.md](reports/stage2_seed42_overview/STAGE2_OVERVIEW.md), not in
 this flow specification.
 
+A separate, opt-in extension preserves that V7 acquisition/training flow and
+adds a minimal Cost-Aware STOP/CONTINUE gate after the mandatory first round.
+Its mixed-policy interpretation, confidence assumptions, non-overwriting
+artifacts, validation, and run commands are documented in
+[docs/v7_minimal_cost_aware.md](docs/v7_minimal_cost_aware.md). The legacy V7
+configs contain no `cost_aware` section and retain their original behavior.
+
 ## Scientific objective
 
 The method does not merely select globally uncertain MNLI examples. It attempts
