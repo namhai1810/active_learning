@@ -32,9 +32,13 @@ cost_aware:
   K: 1
   T: 7
 
-  # Historical predeclared scale from configs/main_cost_aware.yaml. This is
-  # intentionally not calibrated against seed-42 or final-test outcomes.
-  lambda_cost: 0.001
+  # Ex-ante utility calibration, independent of seed/model/final-test results:
+  # a full 1.0 reduction in binary validation risk is worth at most USD 5.
+  # Therefore lambda = 1.0 / 5.0 = 0.2 gain units per USD.
+  calibration_reference_gain: 1.0
+  calibration_reference_cost: 5.0
+  calibration_currency: USD
+  lambda_cost: 0.2
   cost:
     type: full_pipeline
     currency: USD

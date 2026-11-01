@@ -59,14 +59,14 @@ def main() -> None:
             states=certified,
             estimate=complete,
             required_pilots=policy.required_pilots,
-            cost=1.0,
+            cost=float(policy.calibration_reference_cost) - 0.01,
             lambda_cost=policy.lambda_cost,
         ).to_dict(),
         "nonpositive": decide_mixed_policy_round(
             states=certified,
             estimate=complete,
             required_pilots=policy.required_pilots,
-            cost=1_000_000.0,
+            cost=float(policy.calibration_reference_cost),
             lambda_cost=policy.lambda_cost,
         ).to_dict(),
         "unresolved": decide_mixed_policy_round(

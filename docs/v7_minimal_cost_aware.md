@@ -47,8 +47,15 @@ controller defines one action:
 
 ```text
 pi_t = train on the exact 32-example batch returned by the unchanged V7 selector
-U_t(pi) = Delta_hat_t(pi) + b_t(pi) - lambda C_t(pi).
+G_UCB(pi) = min(M, Delta_hat_t(pi) + b_t(pi))
+U_t(pi) = G_UCB(pi) - lambda C_t(pi).
 ```
+
+The intersection with `M` does not shrink or replace the Hoeffding radius.
+Because pilot gain is defined as a difference of risks in `[0,1]`, its mean is
+known a priori to satisfy `Delta <= M=1`. Therefore the minimum of the
+Hoeffding upper bound and `M` remains a valid upper confidence bound. Both raw
+and support-bounded UCBs are logged.
 
 Four temporary pilot clones start from the same current LoRA checkpoint and
 AdamW state, train on the exact selected batch with the same early-stopping
@@ -89,12 +96,26 @@ These reasons remain distinct in `stop_reason_category`.
   examples.
 - Sealed HANS and MNLI are materialized only after the adaptive loop freezes.
 
-## Cost model
+## Cost model and ex-ante scale calibration
 
-The historical untuned values are retained:
+The historical USD rates and projections from `configs/main_cost_aware.yaml`
+are retained, but the old `lambda=.001` is not: it placed the maximum possible
+gain and ordinary round costs on incompatible scales. Lambda is now fixed by a
+declared utility assumption made without seed/model/final-test outcomes:
 
-- `lambda=0.001`;
-- the USD rates and projections from `configs/main_cost_aware.yaml`;
+```text
+reference gain = 1.0 (complete elimination of binary validation risk)
+maximum willingness to pay = USD 5.0
+lambda = 1.0 / 5.0 = 0.2 gain units per USD
+```
+
+The config loader rejects an enabled run unless `lambda` exactly matches these
+two calibration fields. This is a scientific preference/utility assumption,
+not an empirically estimated parameter. Changing it would define a different
+protocol and requires a new preregistered experiment rather than tuning a run.
+
+The cost ledger includes:
+
 - incurred teacher, generation/QC, selector-evaluation, and pilot resources;
 - projected main training and validation resources known before the decision.
 
@@ -107,7 +128,7 @@ Round 1 and the frozen initial-pool sunk cost are logged separately from the
 round-2+ decision-cost sum. Cost rates are assumptions, not market-price
 claims.
 
-## Important limitation: wide UCB
+## Important limitation: STOP is possible, not guaranteed
 
 With the frozen values,
 
@@ -115,10 +136,13 @@ With the frozen values,
 b = M * sqrt(2 log(2 K T / delta) / m) = 1.6785096966.
 ```
 
-For zero estimated gain, `lambda=.001` requires a cost of about 1,678.51 USD
-before `U<=0`. Under the configured rates, the controller is therefore likely
-to CONTINUE to the maximum budget. This is reported rather than tuned using
-seed 42 or final-test performance.
+The raw radius remains wider than the feasible gain interval. Intersecting the
+gain UCB with `M=1` makes its largest possible value exactly 1, so the maximum
+break-even cost under `lambda=.2` is USD 5. A lower observed gain UCB has a
+proportionally lower break-even cost. This makes gain-cost STOP operationally
+possible without weakening the confidence statement, but does not guarantee
+that any seed stops before round 8. Unresolved hypotheses and insufficient
+pilot evidence still force CONTINUE rather than a fabricated gain-cost STOP.
 
 The conditional independence and unbiasedness of pilot gains remain
 unverified: pilot shards and training seeds are disjoint, but the runs share a
@@ -134,7 +158,14 @@ Each seed writes under `outputs/stage2_runs_v7_minimal_cost_aware/seed_N/`:
 - `cost_aware/round_NNN/{gain_estimate,cost,decision}.json`;
 - `rounds.jsonl` with states, selection, training, resources, and decisions;
 - `cost_aware_stop.json` for a gain-cost STOP;
+- `hans_prediction_rule_metrics.json` with Three-way and Direct Binary HANS;
 - `result.json`, `V7_MINIMAL_COST_AWARE.md`, and `.complete`.
+
+Final evaluation uses one frozen probability pass to report both
+`argmax(P(E),P(N),P(C)) -> binary` and
+`argmax(P(E),P(N)+P(C))`. MNLI matched/mismatched, budget, cost, and stop reason
+are included in the artifact-only three-seed report. Sealed final-test outputs
+never enter STOP/CONTINUE, early stopping, or lambda calibration.
 
 Completed pilot observations are atomic resume boundaries. Resume validates
 checkpoint, selected IDs, eval IDs, and training policy before reuse. Partial

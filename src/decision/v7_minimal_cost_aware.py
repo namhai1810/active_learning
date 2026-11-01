@@ -35,6 +35,9 @@ class V7MinimalCostAwareConfig:
     K: int
     T: int
     lambda_cost: float
+    calibration_reference_gain: float | None
+    calibration_reference_cost: float | None
+    calibration_currency: str | None
     pilot_seed: int
     preserve_pilot_adapters: bool
 
@@ -53,6 +56,21 @@ class V7MinimalCostAwareConfig:
             K=int(raw.get("K", 1)),
             T=int(raw.get("T", 1)),
             lambda_cost=float(raw.get("lambda_cost", 0.001)),
+            calibration_reference_gain=(
+                None
+                if raw.get("calibration_reference_gain") is None
+                else float(raw["calibration_reference_gain"])
+            ),
+            calibration_reference_cost=(
+                None
+                if raw.get("calibration_reference_cost") is None
+                else float(raw["calibration_reference_cost"])
+            ),
+            calibration_currency=(
+                None
+                if raw.get("calibration_currency") is None
+                else str(raw["calibration_currency"]).strip()
+            ),
             pilot_seed=int(raw.get("pilot_seed", 42)),
             preserve_pilot_adapters=bool(
                 raw.get("preserve_pilot_adapters", False)
@@ -72,6 +90,51 @@ class V7MinimalCostAwareConfig:
             raise ValueError("cost_aware.T must be positive")
         if not math.isfinite(config.lambda_cost) or config.lambda_cost < 0:
             raise ValueError("cost_aware.lambda_cost must be non-negative")
+        if config.enabled:
+            if (
+                config.calibration_reference_gain is None
+                or config.calibration_reference_cost is None
+                or not config.calibration_currency
+            ):
+                raise ValueError(
+                    "Enabled Cost-Aware requires an explicit gain/cost calibration"
+                )
+            if (
+                not math.isfinite(config.calibration_reference_gain)
+                or config.calibration_reference_gain <= 0
+                or config.calibration_reference_gain > config.M
+            ):
+                raise ValueError(
+                    "calibration_reference_gain must be in (0, M]"
+                )
+            if (
+                not math.isfinite(config.calibration_reference_cost)
+                or config.calibration_reference_cost <= 0
+            ):
+                raise ValueError(
+                    "calibration_reference_cost must be finite and positive"
+                )
+            calibrated_lambda = (
+                config.calibration_reference_gain
+                / config.calibration_reference_cost
+            )
+            if not math.isclose(
+                config.lambda_cost,
+                calibrated_lambda,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    "lambda_cost must equal calibration_reference_gain / "
+                    "calibration_reference_cost"
+                )
+            raw_cost = raw.get("cost")
+            if not isinstance(raw_cost, Mapping):
+                raise ValueError("Enabled Cost-Aware requires a cost mapping")
+            if str(raw_cost.get("currency", "")).strip() != config.calibration_currency:
+                raise ValueError(
+                    "calibration_currency must match cost.currency"
+                )
         return config
 
 
@@ -85,7 +148,12 @@ class MixedPolicyDecision:
     cost: float
     lambda_cost: float
     estimated_net_value: float | None
+    raw_gain_ucb: float | None
+    bounded_gain_ucb: float | None
+    raw_optimistic_net_value: float | None
     optimistic_net_value: float | None
+    gain_upper_bound_M: float
+    cost_penalty: float
     required_pilots: int
     observed_pilots: int
     certified_hypotheses: tuple[str, ...]
@@ -196,6 +264,8 @@ def decide_mixed_policy_round(
         "policy_id": MIXED_POLICY_ID,
         "cost": float(cost),
         "lambda_cost": float(lambda_cost),
+        "gain_upper_bound_M": float(estimate.M),
+        "cost_penalty": float(lambda_cost * cost),
         "required_pilots": required_pilots,
         "observed_pilots": estimate.m,
         "certified_hypotheses": certified,
@@ -209,6 +279,9 @@ def decide_mixed_policy_round(
             delta_hat=estimate.delta_hat,
             confidence_radius=estimate.radius,
             estimated_net_value=None,
+            raw_gain_ucb=None,
+            bounded_gain_ucb=None,
+            raw_optimistic_net_value=None,
             optimistic_net_value=None,
             gain_cost_stop_evaluated=False,
             **common,
@@ -220,6 +293,9 @@ def decide_mixed_policy_round(
             delta_hat=estimate.delta_hat,
             confidence_radius=estimate.radius,
             estimated_net_value=None,
+            raw_gain_ucb=None,
+            bounded_gain_ucb=None,
+            raw_optimistic_net_value=None,
             optimistic_net_value=None,
             gain_cost_stop_evaluated=False,
             **common,
@@ -236,6 +312,9 @@ def decide_mixed_policy_round(
             delta_hat=estimate.delta_hat,
             confidence_radius=estimate.radius,
             estimated_net_value=None,
+            raw_gain_ucb=None,
+            bounded_gain_ucb=None,
+            raw_optimistic_net_value=None,
             optimistic_net_value=None,
             gain_cost_stop_evaluated=False,
             **common,
@@ -243,9 +322,15 @@ def decide_mixed_policy_round(
     estimated_net = compute_net_value(
         estimate.delta_hat, cost, lambda_cost
     )
-    optimistic_net = compute_optimistic_net_value(
+    raw_gain_ucb = estimate.delta_hat + estimate.radius
+    # Since every gain observation lies in [-M, M], its population mean also
+    # satisfies Delta <= M. Intersecting the Hoeffding upper interval with this
+    # known support bound tightens the UCB without changing its coverage.
+    bounded_gain_ucb = min(estimate.M, raw_gain_ucb)
+    raw_optimistic_net = compute_optimistic_net_value(
         estimate.delta_hat, estimate.radius, cost, lambda_cost
     )
+    optimistic_net = bounded_gain_ucb - lambda_cost * cost
     return MixedPolicyDecision(
         action="continue" if optimistic_net > 0.0 else "stop",
         reason=(
@@ -256,6 +341,9 @@ def decide_mixed_policy_round(
         delta_hat=estimate.delta_hat,
         confidence_radius=estimate.radius,
         estimated_net_value=estimated_net,
+        raw_gain_ucb=raw_gain_ucb,
+        bounded_gain_ucb=bounded_gain_ucb,
+        raw_optimistic_net_value=raw_optimistic_net,
         optimistic_net_value=optimistic_net,
         gain_cost_stop_evaluated=True,
         **common,

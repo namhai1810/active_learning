@@ -31,9 +31,10 @@ from src.benchmark.selection import select_closed_loop_soft_pairs
 from src.benchmark.stopping_subset import validate_stopping_subset_manifest
 from src.data.hans import HANSExample
 from src.data.pipeline_split import manifest_payload, reconstruct_five_way_split
-from src.data.labels import MNLI_LABELS
+from src.data.labels import MNLI_LABELS, mnli_to_hans
 from src.data.mnli import load_mnli
 from src.evaluation.hans import evaluate_hans
+from src.evaluation.metrics import compute_hans_metrics
 from src.evaluation.mnli import evaluate_mnli
 from src.decision.cost_model import CostUsage, compute_cost, cost_rates_from_config
 from src.decision.v7_minimal_cost_aware import (
@@ -964,6 +965,88 @@ def _cost_aware_stop_category(reason: str) -> str:
     return "other"
 
 
+def _evaluate_hans_prediction_rules(
+    student: QwenNLIStudent,
+    examples: list[HANSExample],
+    *,
+    batch_size: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Evaluate both HANS mappings from one frozen probability pass."""
+    if not examples:
+        raise ValueError("HANS prediction-rule evaluation requires examples")
+    probabilities = student.predict_proba(
+        [item.premise for item in examples],
+        [item.hypothesis for item in examples],
+        batch_size=batch_size,
+    )
+    if len(probabilities) != len(examples):
+        raise RuntimeError("HANS probabilities and examples do not align")
+    records: list[dict[str, Any]] = []
+    three_way_predictions: list[str] = []
+    direct_binary_predictions: list[str] = []
+    for example, row in zip(examples, probabilities, strict=True):
+        if len(row) != len(MNLI_LABELS):
+            raise ValueError("HANS probabilities must use MNLI label order")
+        values = [float(value) for value in row]
+        if any(not math.isfinite(value) or value < 0.0 for value in values):
+            raise ValueError("HANS probabilities must be finite and non-negative")
+        mnli_prediction = MNLI_LABELS[
+            max(range(len(values)), key=values.__getitem__)
+        ]
+        three_way = mnli_to_hans(mnli_prediction)
+        direct_binary = (
+            "entailment"
+            if values[0] >= values[1] + values[2]
+            else "non-entailment"
+        )
+        three_way_predictions.append(three_way)
+        direct_binary_predictions.append(direct_binary)
+        records.append(
+            {
+                "id": example.id,
+                "premise": example.premise,
+                "hypothesis": example.hypothesis,
+                "gold": example.gold,
+                "prediction": three_way,
+                "correct": three_way == example.gold,
+                "heuristic": example.heuristic,
+                "subcase": example.subcase,
+                "mnli_prediction": mnli_prediction,
+                "mnli_probabilities": dict(zip(MNLI_LABELS, values, strict=True)),
+                "direct_binary_prediction": direct_binary,
+                "direct_binary_correct": direct_binary == example.gold,
+                "prediction_rules_disagree": three_way != direct_binary,
+            }
+        )
+
+    def metrics(predictions: list[str]) -> dict[str, Any]:
+        return compute_hans_metrics(
+            [item.gold for item in examples],
+            predictions,
+            [item.heuristic for item in examples],
+            [item.subcase for item in examples],
+        )
+
+    disagreement = sum(
+        left != right
+        for left, right in zip(
+            three_way_predictions, direct_binary_predictions, strict=True
+        )
+    )
+    return records, {
+        "three_way_argmax_to_binary": metrics(three_way_predictions),
+        "direct_binary_probability_aggregation": metrics(
+            direct_binary_predictions
+        ),
+        "disagreement": {
+            "count": disagreement,
+            "rate": disagreement / len(examples),
+        },
+        "mnli_label_order": list(MNLI_LABELS),
+        "sealed_final_test_used_for_decision": False,
+    }
+
+
 def _evaluate_checkpoint(
     *,
     model: dict[str, Any],
@@ -973,6 +1056,7 @@ def _evaluate_checkpoint(
     mnli_config: dict[str, Any],
     output: Path,
     audit_adapter: bool,
+    report_hans_prediction_rules: bool = False,
 ) -> dict[str, Any]:
     """Evaluate one final branch and keep its predictions fully separate."""
     output.mkdir(parents=True, exist_ok=True)
@@ -986,11 +1070,24 @@ def _evaluate_checkpoint(
         batch_size=int(model.get("batch_size", 4)),
     )
     write_jsonl(output / "gain_report_predictions.jsonl", gain_predictions)
-    final_predictions, hans_metrics = evaluate_hans(
-        student,
-        _hans(final_rows),
-        batch_size=int(model.get("batch_size", 4)),
-    )
+    hans_prediction_rules = None
+    if report_hans_prediction_rules:
+        final_predictions, hans_prediction_rules = _evaluate_hans_prediction_rules(
+            student,
+            _hans(final_rows),
+            batch_size=int(model.get("batch_size", 4)),
+        )
+        hans_metrics = hans_prediction_rules["three_way_argmax_to_binary"]
+        write_json(
+            output / "hans_prediction_rule_metrics.json",
+            hans_prediction_rules,
+        )
+    else:
+        final_predictions, hans_metrics = evaluate_hans(
+            student,
+            _hans(final_rows),
+            batch_size=int(model.get("batch_size", 4)),
+        )
     write_jsonl(output / "hans_final_predictions.jsonl", final_predictions)
     mnli_metrics: dict[str, Any] = {}
     for name, split in (
@@ -1015,6 +1112,7 @@ def _evaluate_checkpoint(
     _clear_cuda_cache()
     return {
         "hans_final": hans_metrics,
+        "hans_prediction_rules": hans_prediction_rules,
         "gain_report": gain_metrics,
         "mnli": mnli_metrics,
         "adapter_load_audit": load_audit,
@@ -1870,6 +1968,7 @@ def main() -> None:
             mnli_config=mnli_config,
             output=output,
             audit_adapter=True,
+            report_hans_prediction_rules=minimal_cost_aware_v7,
         )
         final_evaluation_seconds = time.perf_counter() - evaluation_started
         teacher_totals = dict(final_audit_teacher_usage)
@@ -2023,6 +2122,9 @@ def main() -> None:
                     "stop_reason_category": _cost_aware_stop_category(stop_reason),
                     "cost_aware_rounds": cost_aware_decisions,
                     "cost_aware_stop_record": cost_aware_stop_record,
+                    "hans_prediction_rules": evaluation[
+                        "hans_prediction_rules"
+                    ],
                     "total_modeled_decision_cost_rounds_2_plus": (
                         cumulative_modeled_decision_cost
                     ),
@@ -2035,7 +2137,19 @@ def main() -> None:
                             "intervention"
                         ),
                         "conditional_independence_empirically_proven": False,
-                        "ucb_may_be_too_wide_to_stop": True,
+                        "raw_hoeffding_radius_may_exceed_gain_support": True,
+                        "gain_ucb_intersects_known_support_bound": True,
+                        "lambda_calibration": {
+                            "reference_gain": (
+                                cost_aware_config.calibration_reference_gain
+                            ),
+                            "reference_cost": (
+                                cost_aware_config.calibration_reference_cost
+                            ),
+                            "currency": cost_aware_config.calibration_currency,
+                            "lambda_cost": cost_aware_config.lambda_cost,
+                            "uses_final_test": False,
+                        },
                     },
                     "pilot_eval_plan": {
                         key: value
@@ -2069,11 +2183,22 @@ def main() -> None:
                     f"{_cost_aware_stop_category(stop_reason)}",
                     "- Appendix hypothesis-specific theorem claimed: no",
                     "- Controller scope: exact mixed-policy round action",
+                    "- Gain UCB: min(M, delta_hat + Hoeffding radius)",
+                    f"- Lambda calibration: {cost_aware_config.lambda_cost} "
+                    "gain/USD",
                 ]
                 if minimal_cost_aware_v7
                 else []
             ),
             f"- HANS final accuracy: {float(evaluation['hans_final']['overall_accuracy']):.6f}",
+            *(
+                [
+                    "- HANS Direct Binary accuracy: "
+                    f"{float(evaluation['hans_prediction_rules']['direct_binary_probability_aggregation']['overall_accuracy']):.6f}"
+                ]
+                if minimal_cost_aware_v7
+                else []
+            ),
             f"- MNLI matched/mismatched: {float(evaluation['mnli']['matched']['accuracy']):.6f} / {float(evaluation['mnli']['mismatched']['accuracy']):.6f}",
             "",
             "Training early stopping uses only the predeclared gain-eval stopping subset.",

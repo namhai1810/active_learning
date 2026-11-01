@@ -82,6 +82,15 @@ def audit_protocol() -> dict[str, Any]:
             current["cost_aware"]["decision_scope"]
             == "exact_v7_mixed_soft_pair_round_action"
         ),
+        "lambda_has_explicit_ex_ante_calibration": (
+            policy.calibration_reference_gain is not None
+            and policy.calibration_reference_cost is not None
+            and policy.lambda_cost
+            == policy.calibration_reference_gain
+            / policy.calibration_reference_cost
+            and policy.calibration_currency
+            == current["cost_aware"]["cost"]["currency"]
+        ),
     }
     return {
         "status": "ready" if all(checks.values()) else "failed",
@@ -91,19 +100,25 @@ def audit_protocol() -> dict[str, Any]:
         "round_1_cost_decision": False,
         "decision_rounds": list(range(2, 9)),
         "gain_ucb": {
-            "formula": "delta_hat + b - lambda_cost * C",
+            "formula": "min(M, delta_hat + b) - lambda_cost * C",
             "M": policy.M,
             "m": policy.required_pilots,
             "K": policy.K,
             "T": policy.T,
             "delta": policy.delta,
             "radius": radius,
+            "raw_radius_unchanged": True,
+            "known_gain_support_upper_bound": policy.M,
             "lambda_cost": policy.lambda_cost,
-            "zero_gain_stop_cost_threshold": radius / policy.lambda_cost,
+            "calibration_reference_gain": policy.calibration_reference_gain,
+            "calibration_reference_cost": policy.calibration_reference_cost,
+            "calibration_currency": policy.calibration_currency,
+            "maximum_ucb_break_even_cost": policy.M / policy.lambda_cost,
+            "support_intersection_preserves_coverage": True,
         },
         "expected_stopping_behavior": (
-            "The predeclared radius/cost scale is likely to CONTINUE to budget; "
-            "it is not retuned from seed or final-test outcomes."
+            "STOP is feasible when lambda*C reaches the bounded gain UCB. "
+            "It is not forced and no seed/final-test outcome calibrates lambda."
         ),
         "pilot_eval": {
             "source": 2850,
