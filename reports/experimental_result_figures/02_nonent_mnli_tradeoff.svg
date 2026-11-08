@@ -1,48 +1,76 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="590" viewBox="0 0 900 590">
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700">
 <rect width="100%" height="100%" fill="white"/>
 <style>text{font-family:Inter,Arial,sans-serif;fill:#172033}.title{font-size:22px;font-weight:700}.axis{font-size:13px}.small{font-size:11px}.grid{stroke:#dbe3ed;stroke-width:1}.base{stroke:#475569;stroke-width:1.2}</style>
-<text x="450.0" y="31.0" class="title" text-anchor="middle">HANS non-entailment vs MNLI retention</text>
-<line x1="85.0" y1="65" x2="85.0" y2="515" class="grid"/>
-<text x="85.0" y="548.0" class="small" text-anchor="middle">57%</text>
-<line x1="240.0" y1="65" x2="240.0" y2="515" class="grid"/>
-<text x="240.0" y="548.0" class="small" text-anchor="middle">58%</text>
-<line x1="395.0" y1="65" x2="395.0" y2="515" class="grid"/>
-<text x="395.0" y="548.0" class="small" text-anchor="middle">59%</text>
-<line x1="550.0" y1="65" x2="550.0" y2="515" class="grid"/>
-<text x="550.0" y="548.0" class="small" text-anchor="middle">60%</text>
-<line x1="705.0" y1="65" x2="705.0" y2="515" class="grid"/>
-<text x="705.0" y="548.0" class="small" text-anchor="middle">61%</text>
-<line x1="860.0" y1="65" x2="860.0" y2="515" class="grid"/>
-<text x="860.0" y="548.0" class="small" text-anchor="middle">62%</text>
-<line x1="85" y1="472.14285714285717" x2="860" y2="472.14285714285717" class="grid"/>
-<text x="77.0" y="476.1" class="small" text-anchor="end">34%</text>
-<line x1="85" y1="386.42857142857144" x2="860" y2="386.42857142857144" class="grid"/>
-<text x="77.0" y="390.4" class="small" text-anchor="end">36%</text>
-<line x1="85" y1="300.7142857142857" x2="860" y2="300.7142857142857" class="grid"/>
-<text x="77.0" y="304.7" class="small" text-anchor="end">38%</text>
-<line x1="85" y1="215.0" x2="860" y2="215.0" class="grid"/>
-<text x="77.0" y="219.0" class="small" text-anchor="end">40%</text>
-<line x1="85" y1="129.28571428571428" x2="860" y2="129.28571428571428" class="grid"/>
-<text x="77.0" y="133.3" class="small" text-anchor="end">42%</text>
-<circle cx="186.7804381049404" cy="482.7784350016217" r="6" fill="#64748b"/>
-<circle cx="300.4839531329593" cy="422.10183365452485" r="6" fill="#f59e0b"/>
-<circle cx="471.039225674986" cy="315.6315709133928" r="6" fill="#2563eb"/>
-<circle cx="711.079979623026" cy="116.42914384933894" r="6" fill="#2563eb"/>
-<text x="718.1" y="110.4" class="small" text-anchor="start">Uncertainty MNLI</text>
-<circle cx="447.35099337748414" cy="284.72084947241876" r="6" fill="#f59e0b"/>
-<text x="454.4" y="278.7" class="small" text-anchor="start">Failure-driven, no verification</text>
-<circle cx="570.5298013245038" cy="220.03730275334402" r="6" fill="#2563eb"/>
-<circle cx="456.82628629648605" cy="331.08693163387966" r="6" fill="#2563eb"/>
-<circle cx="501.04431991849174" cy="266.9758056822302" r="6" fill="#2563eb"/>
-<circle cx="403.13295975547624" cy="374.5909099582133" r="6" fill="#2563eb"/>
-<circle cx="327.3306164034648" cy="397.48774065523077" r="6" fill="#8b5cf6"/>
-<circle cx="396.8160978094747" cy="347.1147131217922" r="6" fill="#8b5cf6"/>
-<text x="403.8" y="341.1" class="small" text-anchor="start">Core-set (synthetic)</text>
-<circle cx="335.22669383596644" cy="395.1980575855291" r="6" fill="#8b5cf6"/>
-<circle cx="411.02903718797796" cy="349.40439619149384" r="6" fill="#8b5cf6"/>
-<circle cx="338.38512480896566" cy="372.3012268885116" r="6" fill="#059669"/>
-<text x="345.4" y="366.3" class="small" text-anchor="start">Verified V7 continuation</text>
-<circle cx="308.38003056545995" cy="404.35678986433606" r="6" fill="#059669"/>
-<text x="450.0" y="578.0" class="axis" text-anchor="middle">MNLI matched accuracy (%)</text>
-<text x="20.0" y="295.0" class="axis" text-anchor="middle" transform="rotate(-90 20 295.0)">HANS non-entailment (%)</text>
+<text x="500.0" y="31.0" class="title" text-anchor="middle">Robustness–retention trade-off across protocol strata</text>
+<line x1="90.0" y1="70" x2="90.0" y2="620" class="grid"/>
+<text x="90.0" y="658.0" class="small" text-anchor="middle">57%</text>
+<line x1="213.57142857142856" y1="70" x2="213.57142857142856" y2="620" class="grid"/>
+<text x="213.6" y="658.0" class="small" text-anchor="middle">58%</text>
+<line x1="337.1428571428571" y1="70" x2="337.1428571428571" y2="620" class="grid"/>
+<text x="337.1" y="658.0" class="small" text-anchor="middle">59%</text>
+<line x1="460.71428571428567" y1="70" x2="460.71428571428567" y2="620" class="grid"/>
+<text x="460.7" y="658.0" class="small" text-anchor="middle">60%</text>
+<line x1="584.2857142857142" y1="70" x2="584.2857142857142" y2="620" class="grid"/>
+<text x="584.3" y="658.0" class="small" text-anchor="middle">61%</text>
+<line x1="707.8571428571429" y1="70" x2="707.8571428571429" y2="620" class="grid"/>
+<text x="707.9" y="658.0" class="small" text-anchor="middle">62%</text>
+<line x1="831.4285714285713" y1="70" x2="831.4285714285713" y2="620" class="grid"/>
+<text x="831.4" y="658.0" class="small" text-anchor="middle">63%</text>
+<line x1="955.0" y1="70" x2="955.0" y2="620" class="grid"/>
+<text x="955.0" y="658.0" class="small" text-anchor="middle">64%</text>
+<line x1="90" y1="620.0" x2="955" y2="620.0" class="grid"/>
+<text x="82.0" y="624.0" class="small" text-anchor="end">30%</text>
+<line x1="90" y1="510.0" x2="955" y2="510.0" class="grid"/>
+<text x="82.0" y="514.0" class="small" text-anchor="end">40%</text>
+<line x1="90" y1="400.0" x2="955" y2="400.0" class="grid"/>
+<text x="82.0" y="404.0" class="small" text-anchor="end">50%</text>
+<line x1="90" y1="290.0" x2="955" y2="290.0" class="grid"/>
+<text x="82.0" y="294.0" class="small" text-anchor="end">60%</text>
+<line x1="90" y1="180.0" x2="955" y2="180.0" class="grid"/>
+<text x="82.0" y="184.0" class="small" text-anchor="end">70%</text>
+<line x1="90" y1="70.0" x2="955" y2="70.0" class="grid"/>
+<text x="82.0" y="74.0" class="small" text-anchor="end">80%</text>
+<circle cx="171.14292991776352" cy="578.7297983170829" r="5" fill="#64748b" opacity="0.8"/>
+<circle cx="261.79135434102284" cy="563.1561373046613" r="5" fill="#f59e0b" opacity="0.8"/>
+<circle cx="397.76399097591053" cy="535.8287698677708" r="5" fill="#2563eb" opacity="0.8"/>
+<circle cx="589.1328869805691" cy="484.7001469213303" r="5" fill="#2563eb" opacity="0.8"/>
+<text x="596.1" y="478.7" class="small" text-anchor="start">Uncertainty MNLI</text>
+<circle cx="378.8789025543998" cy="527.8950180312542" r="5" fill="#f59e0b" opacity="0.8"/>
+<text x="385.9" y="521.9" class="small" text-anchor="start">Failure-driven, no verification</text>
+<circle cx="477.08136234626346" cy="511.29290770669166" r="5" fill="#2563eb" opacity="0.8"/>
+<circle cx="386.432937923005" cy="539.7956457860291" r="5" fill="#2563eb" opacity="0.8"/>
+<circle cx="421.6851029764934" cy="523.3404567917725" r="5" fill="#2563eb" opacity="0.8"/>
+<circle cx="343.62673750090966" cy="550.9616668892747" r="5" fill="#2563eb" opacity="0.8"/>
+<circle cx="283.19445455207097" cy="556.8385201015092" r="5" fill="#8b5cf6" opacity="0.8"/>
+<circle cx="338.5907139218392" cy="543.9094430345933" r="5" fill="#8b5cf6" opacity="0.8"/>
+<text x="345.6" y="537.9" class="small" text-anchor="start">Core-set (synthetic)</text>
+<circle cx="289.4894840259087" cy="556.2508347802859" r="5" fill="#8b5cf6" opacity="0.8"/>
+<circle cx="349.9217669747474" cy="544.4971283558168" r="5" fill="#8b5cf6" opacity="0.8"/>
+<circle cx="292.00749581544267" cy="550.3739815680514" r="5" fill="#059669" opacity="0.8"/>
+<text x="299.0" y="544.4" class="small" text-anchor="start">Verified V7 continuation</text>
+<circle cx="268.0863838148598" cy="558.6015760651796" r="5" fill="#059669" opacity="0.8"/>
+<rect x="184.028018339276" y="408.6186723654334" width="12" height="12" fill="#059669"/>
+<text x="198.0" y="407.6" class="small" text-anchor="start">ON-42 [B128]</text>
+<rect x="754.3576886689469" y="232.01923333778547" width="12" height="12" fill="#059669"/>
+<text x="768.4" y="231.0" class="small" text-anchor="start">ON-43 [B128]</text>
+<rect x="394.28200276544703" y="320.9066381728329" width="12" height="12" fill="#059669"/>
+<text x="408.3" y="319.9" class="small" text-anchor="start">ON-44 [B128]</text>
+<rect x="649.8601994032447" y="386.8743154801657" width="12" height="12" fill="#dc2626"/>
+<text x="663.9" y="385.9" class="small" text-anchor="start">OFF-42 [B128]</text>
+<rect x="870.1862309875556" y="186.76746360357947" width="12" height="12" fill="#dc2626"/>
+<text x="884.2" y="185.8" class="small" text-anchor="start">OFF-43 [B128]</text>
+<rect x="702.7384469834808" y="310.6221450514224" width="12" height="12" fill="#dc2626"/>
+<text x="716.7" y="309.6" class="small" text-anchor="start">OFF-44 [B128]</text>
+<polygon points="429.2391383450985,182.41672231868574 437.2391383450985,190.41672231868574 429.2391383450985,198.41672231868574 421.2391383450985,190.41672231868574" fill="#0f766e"/>
+<text x="438.2" y="183.4" class="small" text-anchor="start">R8-42 [B256]</text>
+<polygon points="610.5359871916155,115.71443835982367 618.5359871916155,123.71443835982367 610.5359871916155,131.71443835982367 602.5359871916155,123.71443835982367" fill="#0f766e"/>
+<text x="619.5" y="116.7" class="small" text-anchor="start">R8-43 [B256]</text>
+<circle cx="710" cy="88" r="5" fill="#64748b"/>
+<text x="722.0" y="92.0" class="small" text-anchor="start">historical B128 seed 42</text>
+<rect x="710" y="105" width="11" height="11" fill="#059669"/>
+<text x="727.0" y="115.0" class="small" text-anchor="start">ON/OFF B128 per seed</text>
+<polygon points="716,130 722,136 716,142 710,136" fill="#0f766e"/>
+<text x="727.0" y="140.0" class="small" text-anchor="start">R8 B256 per seed</text>
+<text x="500.0" y="688.0" class="axis" text-anchor="middle">MNLI matched accuracy (%)</text>
+<text x="20.0" y="350.0" class="axis" text-anchor="middle" transform="rotate(-90 20 350.0)">HANS non-entailment (%)</text>
 </svg>

@@ -57,13 +57,13 @@ The published selectors below are **implemented/reproduced acquisition baselines
 
 ![Main HANS comparison](reports/experimental_result_figures/01_main_hans_comparison.svg)
 
-*Figure 1: Sealed-HANS 15k accuracy for completed seed-42 budget-128 implemented baselines. The figure deliberately excludes the newer multi-seed early-stopping rows to avoid encoding unequal uncertainty as a single ranking.*
+*Figure 1: Sealed-HANS 15k accuracy for historical/reproduced budget-128 baselines, each Verification ON/OFF seed at budget 128, and each extended R8 seed at budget 256. Section boundaries and `[B128]/[B256]` labels prevent the extended results from being read as an equal-budget ranking.*
 
 At seed 42, uncertainty sampling from MNLI exceeds historical V7 continuation by `1.9933` pp overall and `5.9703` pp on non-entailment. Core-set and CAL on the static verified synthetic pool are within 0.06 pp of historical V7 continuation, which is not evidence of a meaningful ordering from one seed. Failure-driven acquisition without verification is 0.4667 pp above historical V7 continuation; verification is therefore not uniformly beneficial in the old protocol.
 
 ![Robustness–retention trade-off](reports/experimental_result_figures/02_nonent_mnli_tradeoff.svg)
 
-*Figure 2: HANS non-entailment versus MNLI matched accuracy. Human-MNLI access shifts both axes and must be disclosed.*
+*Figure 2: HANS non-entailment versus MNLI matched accuracy. Circles denote historical seed-42 budget-128 runs, squares denote individual ON/OFF budget-128 runs, and diamonds denote R8 budget-256 runs. Human-MNLI access and unequal budgets remain explicit confounders.*
 
 ### Extended 256-example trajectories (separate budget)
 

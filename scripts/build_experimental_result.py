@@ -310,28 +310,56 @@ def create_figures(main: list[dict[str, Any]], onoff: list[dict[str, Any]], exte
     """Dependency-light SVG renderer; PNG conversion uses ImageMagick."""
     palette = {"reference":"#64748b","human MNLI":"#2563eb","synthetic":"#f59e0b","static verified synthetic":"#8b5cf6","closed-loop synthetic":"#059669"}
 
-    # Figure 1: horizontal ranking.
-    ordered = sorted(main, key=lambda row: row["hans"])
-    width, height = 1100, 720; left, right, top, bottom = 270, 45, 60, 55
-    low, high = 63.0, 67.5; plot_w = width-left-right; row_h = (height-top-bottom)/len(ordered)
-    body = [text(width/2,30,"Budget-128 sealed-HANS comparison (seed 42)","title","middle")]
-    for tick in np.arange(63,68):
+    # Figure 1: protocol-stratified overview.  Rows are grouped rather than
+    # globally ranked so budget-256 results cannot be mistaken for equal-budget
+    # competitors.
+    historical = sorted(main, key=lambda row: row["hans"])
+    modern_128 = [
+        {"name": f"V7 {row['mode']} seed {row['seed']} [B128]", "hans": row["three"], "color": "#059669" if row["mode"] == "ON" else "#dc2626"}
+        for row in onoff
+    ]
+    modern_256 = [
+        {"name": f"V7 R8 seed {row['seed']} [B256]", "hans": row["three"], "color": "#0f766e"}
+        for row in extended
+    ]
+    sections = [
+        ("Historical/reproduced — budget 128, seed 42", [{"name": row["name"], "hans": row["hans"], "color": palette[row["source"]]} for row in historical]),
+        ("Training early-stopping ablation — budget 128", modern_128),
+        ("Extended trajectories — budget 256 (not equal-budget)", modern_256),
+    ]
+    width, height = 1220, 1120; left, right, top, bottom = 330, 55, 70, 65
+    low, high = 63.0, 78.0; plot_w = width-left-right
+    total_rows = sum(len(rows) for _, rows in sections); section_gap = 31
+    row_h = (height-top-bottom-section_gap*len(sections))/total_rows
+    body = [text(width/2,32,"Sealed-HANS overview, stratified by protocol and budget","title","middle")]
+    for tick in np.arange(63,79,3):
         x = left+(tick-low)/(high-low)*plot_w; body += [f'<line x1="{x}" y1="{top}" x2="{x}" y2="{height-bottom}" class="grid"/>',text(x,height-22,f"{tick:.0f}%","small","middle")]
-    for idx,row in enumerate(ordered):
-        y=top+idx*row_h+4; bar=(100*row["hans"]-low)/(high-low)*plot_w
-        body += [text(left-8,y+row_h*.55,row["name"],"small","end"),f'<rect x="{left}" y="{y}" width="{max(bar,1)}" height="{row_h*.68}" rx="2" fill="{palette[row["source"]]}"/>',text(left+bar+5,y+row_h*.52,f"{100*row['hans']:.2f}","small")]
+    cursor = top
+    for section_name, rows in sections:
+        body.append(text(left, cursor+14, section_name, "axis")); cursor += section_gap
+        for row in rows:
+            y=cursor+2; bar=(100*row["hans"]-low)/(high-low)*plot_w
+            body += [text(left-8,y+row_h*.55,row["name"],"small","end"),f'<rect x="{left}" y="{y}" width="{max(bar,1)}" height="{row_h*.68}" rx="2" fill="{row["color"]}"/>',text(left+bar+5,y+row_h*.52,f"{100*row['hans']:.2f}","small")]
+            cursor += row_h
     save_svg("01_main_hans_comparison",width,height,body)
 
-    # Figure 2: trade-off scatter.
-    width,height=900,590; left,right,top,bottom=85,40,65,75; xmin,xmax=57,62; ymin,ymax=33,43.5
+    # Figure 2: trade-off scatter including modern B128 and R8/B256 points.
+    width,height=1000,700; left,right,top,bottom=90,45,70,80; xmin,xmax=57,64; ymin,ymax=30,80
     sx=lambda v:left+(v-xmin)/(xmax-xmin)*(width-left-right); sy=lambda v:top+(ymax-v)/(ymax-ymin)*(height-top-bottom)
-    body=[text(width/2,31,"HANS non-entailment vs MNLI retention","title","middle")]
-    for tick in np.arange(57,63): body += [f'<line x1="{sx(tick)}" y1="{top}" x2="{sx(tick)}" y2="{height-bottom}" class="grid"/>',text(sx(tick),height-42,f"{tick}%","small","middle")]
-    for tick in np.arange(34,44,2): body += [f'<line x1="{left}" y1="{sy(tick)}" x2="{width-right}" y2="{sy(tick)}" class="grid"/>',text(left-8,sy(tick)+4,f"{tick}%","small","end")]
+    body=[text(width/2,31,"Robustness–retention trade-off across protocol strata","title","middle")]
+    for tick in np.arange(57,65): body += [f'<line x1="{sx(tick)}" y1="{top}" x2="{sx(tick)}" y2="{height-bottom}" class="grid"/>',text(sx(tick),height-42,f"{tick}%","small","middle")]
+    for tick in np.arange(30,81,10): body += [f'<line x1="{left}" y1="{sy(tick)}" x2="{width-right}" y2="{sy(tick)}" class="grid"/>',text(left-8,sy(tick)+4,f"{tick}%","small","end")]
     annotate={"Uncertainty MNLI","Verified V7 continuation","Core-set (synthetic)","Failure-driven, no verification"}
     for row in main:
-        x,y=sx(100*row["mnli_m"]),sy(100*row["nonent"]); body.append(f'<circle cx="{x}" cy="{y}" r="6" fill="{palette[row["source"]]}"/>')
+        x,y=sx(100*row["mnli_m"]),sy(100*row["nonent"]); body.append(f'<circle cx="{x}" cy="{y}" r="5" fill="{palette[row["source"]]}" opacity="0.8"/>')
         if row["name"] in annotate: body.append(text(x+7,y-6,row["name"],"small"))
+    for row in onoff:
+        x,y=sx(100*row["mnli_m"]),sy(100*row["three_nonent"]); color="#059669" if row["mode"]=="ON" else "#dc2626"
+        body += [f'<rect x="{x-6}" y="{y-6}" width="12" height="12" fill="{color}"/>',text(x+8,y-7,f"{row['mode']}-{row['seed']} [B128]","small")]
+    for row in extended:
+        x,y=sx(100*row["mnli_m"]),sy(100*row["three_nonent"])
+        body += [f'<polygon points="{x},{y-8} {x+8},{y} {x},{y+8} {x-8},{y}" fill="#0f766e"/>',text(x+9,y-7,f"R8-{row['seed']} [B256]","small")]
+    body += [f'<circle cx="{width-290}" cy="88" r="5" fill="#64748b"/>',text(width-278,92,"historical B128 seed 42","small"),f'<rect x="{width-290}" y="105" width="11" height="11" fill="#059669"/>',text(width-273,115,"ON/OFF B128 per seed","small"),f'<polygon points="{width-284},130 {width-278},136 {width-284},142 {width-290},136" fill="#0f766e"/>',text(width-273,140,"R8 B256 per seed","small")]
     body += [text(width/2,height-12,"MNLI matched accuracy (%)","axis","middle"),text(20,height/2,"HANS non-entailment (%)","axis","middle",-90)]
     save_svg("02_nonent_mnli_tradeoff",width,height,body)
 
@@ -495,13 +523,13 @@ The published selectors below are **implemented/reproduced acquisition baselines
 
 ![Main HANS comparison](reports/experimental_result_figures/01_main_hans_comparison.svg)
 
-*Figure 1: Sealed-HANS 15k accuracy for completed seed-42 budget-128 implemented baselines. The figure deliberately excludes the newer multi-seed early-stopping rows to avoid encoding unequal uncertainty as a single ranking.*
+*Figure 1: Sealed-HANS 15k accuracy for historical/reproduced budget-128 baselines, each Verification ON/OFF seed at budget 128, and each extended R8 seed at budget 256. Section boundaries and `[B128]/[B256]` labels prevent the extended results from being read as an equal-budget ranking.*
 
 At seed 42, uncertainty sampling from MNLI exceeds historical V7 continuation by `{100*(next(r for r in main if r['name']=='Uncertainty MNLI')['hans']-next(r for r in main if r['name']=='Verified V7 continuation')['hans']):.4f}` pp overall and `{100*(next(r for r in main if r['name']=='Uncertainty MNLI')['nonent']-next(r for r in main if r['name']=='Verified V7 continuation')['nonent']):.4f}` pp on non-entailment. Core-set and CAL on the static verified synthetic pool are within 0.06 pp of historical V7 continuation, which is not evidence of a meaningful ordering from one seed. Failure-driven acquisition without verification is 0.4667 pp above historical V7 continuation; verification is therefore not uniformly beneficial in the old protocol.
 
 ![Robustness–retention trade-off](reports/experimental_result_figures/02_nonent_mnli_tradeoff.svg)
 
-*Figure 2: HANS non-entailment versus MNLI matched accuracy. Human-MNLI access shifts both axes and must be disclosed.*
+*Figure 2: HANS non-entailment versus MNLI matched accuracy. Circles denote historical seed-42 budget-128 runs, squares denote individual ON/OFF budget-128 runs, and diamonds denote R8 budget-256 runs. Human-MNLI access and unequal budgets remain explicit confounders.*
 
 ### Extended 256-example trajectories (separate budget)
 
