@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="540" viewBox="0 0 1000 540" role="img" aria-labelledby="title desc">
+  <style>text{font-family:'DejaVu Sans',Arial,sans-serif!important}</style>
+  <title id="title">Time-Adaptive radius theo số pilot hiệu dụng</title>
+  <desc id="desc">Simultaneous Hoeffding radius decreases from 0.347 at 32 pilots to 0.155 at 160 pilots. The fixed-32 baseline is 0.297.</desc>
+  <rect width="1000" height="540" rx="22" fill="#071426"/>
+  <text x="500" y="43" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="24" font-weight="700" fill="#ecf3ff">Sliding-window radius decreases with accumulated pilots</text>
+  <text x="500" y="70" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="14" fill="#9fb0c7">Simultaneous Bonferroni: 7 decisions × (7 windows + cumulative) = 56 tests</text>
+  <rect x="95" y="100" width="820" height="350" rx="12" fill="#0d2138"/>
+  <g stroke="#29445f" stroke-width="1">
+    <line x1="115" y1="410" x2="890" y2="410"/><line x1="115" y1="330" x2="890" y2="330"/>
+    <line x1="115" y1="250" x2="890" y2="250"/><line x1="115" y1="170" x2="890" y2="170"/>
+  </g>
+  <g font-family="Inter,Arial,sans-serif" font-size="13" fill="#9fb0c7" text-anchor="end">
+    <text x="103" y="415">0.10</text><text x="103" y="335">0.20</text><text x="103" y="255">0.30</text><text x="103" y="175">0.40</text>
+  </g>
+  <line x1="115" y1="252.6" x2="890" y2="252.6" stroke="#fbbf24" stroke-width="3" stroke-dasharray="9 7"/>
+  <text x="880" y="242" text-anchor="end" font-family="Inter,Arial,sans-serif" font-size="14" fill="#fbbf24">Fixed-32 baseline = 0.296721</text>
+  <polyline points="150,212.3 325,293.6 500,329.6 675,351.1 850,365.8" fill="none" stroke="#5eead4" stroke-width="5"/>
+  <g fill="#5eead4" stroke="#071426" stroke-width="3">
+    <circle cx="150" cy="212.3" r="8"/><circle cx="325" cy="293.6" r="8"/><circle cx="500" cy="329.6" r="8"/><circle cx="675" cy="351.1" r="8"/><circle cx="850" cy="365.8" r="8"/>
+  </g>
+  <g font-family="Inter,Arial,sans-serif" font-size="14" fill="#ecf3ff" text-anchor="middle">
+    <text x="150" y="194">0.3472</text><text x="325" y="277">0.2455</text><text x="500" y="313">0.2004</text><text x="675" y="335">0.1736</text><text x="850" y="350">0.1553</text>
+  </g>
+  <g font-family="Inter,Arial,sans-serif" font-size="14" fill="#c7d5e7" text-anchor="middle">
+    <text x="150" y="478">32</text><text x="325" y="478">64</text><text x="500" y="478">96</text><text x="675" y="478">128</text><text x="850" y="478">160</text>
+  </g>
+  <text x="500" y="510" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="15" fill="#9fb0c7">Observed pilots (diagnostic n_eff only if assumed)</text>
+  <text x="120" y="129" font-family="Inter,Arial,sans-serif" font-size="14" fill="#a78bfa">Best reduction: 47.67%</text>
+</svg>

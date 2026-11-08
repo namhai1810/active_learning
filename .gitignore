@@ -35,3 +35,4 @@ test_*
 !tests/test_v7_time_adaptive_stopping.py
 !docs/v7_time_adaptive_stopping.md
 !reports/v7_minimal_cost_aware/TIME_ADAPTIVE_STOPPING.md
+!report_111126_figures/*.svg

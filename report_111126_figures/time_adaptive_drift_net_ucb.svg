@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="520" viewBox="0 0 1000 520" role="img" aria-labelledby="title desc">
+  <style>text{font-family:'DejaVu Sans',Arial,sans-serif!important}</style>
+  <title id="title">Minimum Net-UCB theo illustrative temporal drift</title>
+  <desc id="desc">Minimum Net-UCB remains positive and rises from 0.111 at d zero to 0.162 at d 0.02, so no numerical or certified stop occurs.</desc>
+  <rect width="1000" height="520" rx="22" fill="#ffffff"/>
+  <text x="500" y="42" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="23" font-weight="700" fill="#172033">Temporal drift widens Net-UCB and does not create STOP</text>
+  <text x="500" y="69" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="14" fill="#667085">d is illustrative sensitivity only; hypothetical η = 0</text>
+  <rect x="105" y="100" width="790" height="310" rx="10" fill="#f8fafc"/>
+  <rect x="105" y="370" width="790" height="40" fill="#fff0f0"/>
+  <line x1="105" y1="370" x2="895" y2="370" stroke="#d92d20" stroke-width="3"/>
+  <text x="884" y="397" text-anchor="end" font-family="Inter,Arial,sans-serif" font-size="13" fill="#b42318">Certified STOP region: Net-UCB ≤ 0</text>
+  <g stroke="#dfe5ec" stroke-width="1">
+    <line x1="105" y1="290" x2="895" y2="290"/><line x1="105" y1="210" x2="895" y2="210"/><line x1="105" y1="130" x2="895" y2="130"/>
+  </g>
+  <g font-family="Inter,Arial,sans-serif" font-size="13" fill="#667085" text-anchor="end">
+    <text x="93" y="375">0.00</text><text x="93" y="295">0.05</text><text x="93" y="215">0.10</text><text x="93" y="135">0.15</text>
+  </g>
+  <g>
+    <rect x="175" y="192.3" width="115" height="177.7" rx="8" fill="#60a5fa"/>
+    <rect x="355" y="170.7" width="115" height="199.3" rx="8" fill="#818cf8"/>
+    <rect x="535" y="150.7" width="115" height="219.3" rx="8" fill="#a78bfa"/>
+    <rect x="715" y="110.7" width="115" height="259.3" rx="8" fill="#c084fc"/>
+  </g>
+  <g font-family="Inter,Arial,sans-serif" font-size="15" font-weight="700" fill="#172033" text-anchor="middle">
+    <text x="232" y="181">0.1111</text><text x="412" y="159">0.1246</text><text x="592" y="139">0.1371</text><text x="772" y="99">0.1621</text>
+  </g>
+  <g font-family="Inter,Arial,sans-serif" font-size="14" fill="#344054" text-anchor="middle">
+    <text x="232" y="444">d = 0</text><text x="412" y="444">d = 0.005</text><text x="592" y="444">d = 0.01</text><text x="772" y="444">d = 0.02</text>
+  </g>
+  <text x="500" y="484" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="14" fill="#667085">Minimum Net-UCB across seeds / rounds / windows</text>
+</svg>

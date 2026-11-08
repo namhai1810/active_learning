@@ -45,6 +45,7 @@ DEFAULT_CONFIG = Path("configs/stage2_v7_minimal_cost_aware.yaml")
 FIXED_WINDOWS = tuple(range(1, 8))
 DECISION_ROUNDS = tuple(range(2, 9))
 DRIFT_SCENARIOS = (0.0, 0.005, 0.01, 0.02)
+ETA_SCENARIOS = (0.0, 0.005, 0.01, 0.02)
 EXPECTED = {
     "required_pilots": 32,
     "delta": 0.05,
@@ -243,8 +244,14 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "fixed_windows": list(FIXED_WINDOWS),
         "include_cumulative": True,
         "decision_rounds": list(DECISION_ROUNDS),
-        "n_tests": n_tests,
-        "bonferroni_alpha_per_test": EXPECTED["delta"] / n_tests,
+        "n_tests_per_seed": n_tests,
+        "familywise_delta_per_seed": EXPECTED["delta"],
+        "bonferroni_alpha_per_test_per_seed": EXPECTED["delta"] / n_tests,
+        "cross_seed_joint_confidence_claimed": False,
+        "confidence_scope": (
+            "56 predeclared decision/window tests within each seed; seeds are "
+            "reported as separate replicated trajectories"
+        ),
         "protocol": {key: cost_aware[key] for key in EXPECTED},
         "round_checks": checks,
     }
@@ -261,7 +268,7 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
         stopping_examples=int(validation["stopping_examples"]),
     )
     lambda_cost = float(cost_aware["lambda_cost"])
-    n_tests = int(validation["n_tests"])
+    n_tests = int(validation["n_tests_per_seed"])
     baseline_radius = range_aware_hoeffding_radius(
         32,
         delta=EXPECTED["delta"],
@@ -346,12 +353,12 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
                 )
                 radius = (
                     simultaneous_hoeffding_radius(
-                        estimate.n_eff,
+                        estimate.assumption_conditional_n_eff,
                         delta=EXPECTED["delta"],
                         n_tests=n_tests,
                         width=1.0,
                     )
-                    if estimate.n_eff
+                    if estimate.n_observed
                     else None
                 )
                 decision = assess_time_adaptive_decision(
@@ -386,13 +393,13 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
                 )
                 if optimistic_stop:
                     seed_numeric_stops += 1
-                if estimate.n_eff:
+                if estimate.n_observed:
                     seed_min_n = (
-                        estimate.n_eff
+                        estimate.n_observed
                         if seed_min_n is None
-                        else min(seed_min_n, estimate.n_eff)
+                        else min(seed_min_n, estimate.n_observed)
                     )
-                    seed_max_n = max(seed_max_n, estimate.n_eff)
+                    seed_max_n = max(seed_max_n, estimate.n_observed)
                 row = {
                     "seed": seed,
                     "decision_round": decision_round,
@@ -407,7 +414,12 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
                     ),
                     "observed_rounds": json.dumps(estimate.observed_rounds),
                     "zero_pilot_rounds": json.dumps(estimate.zero_pilot_rounds),
+                    "n_observed": estimate.n_observed,
                     "n_eff": estimate.n_eff,
+                    "diagnostic_n_eff": estimate.assumption_conditional_n_eff,
+                    "concentration_assumption_status": (
+                        estimate.concentration_assumption_status
+                    ),
                     "historical_mean_gain": estimate.mean_gain,
                     "sample_variance": estimate.sample_variance,
                     "statistical_radius": radius,
@@ -446,40 +458,55 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
                 }
                 window_rows.append(row)
 
-                if estimate.n_eff:
+                if estimate.n_observed:
                     for d_value in DRIFT_SCENARIOS:
                         rho = weighted_temporal_drift(
                             estimate.observation_counts_by_round,
                             decision_round=decision_round,
                             per_round_drift=d_value,
                         )
-                        gain_ucb = float(estimate.mean_gain) + float(radius) + rho
-                        net = gain_ucb - lambda_cost * cost_lcb.total
-                        sensitivity_rows.append(
-                            {
-                                "seed": seed,
-                                "decision_round": decision_round,
-                                "estimator": label,
-                                "requested_window_length": length,
-                                "n_eff": estimate.n_eff,
-                                "illustrative_d": d_value,
-                                "hypothetical_eta": 0.0,
-                                "weighted_rho": rho,
-                                "gain_ucb": gain_ucb,
-                                "net_ucb": net,
-                                "numerical_stop": net <= 0.0,
-                                "status": "illustrative_sensitivity_not_certificate",
-                                "drift_assumption_calibrated": False,
-                                "eta_guarantee_proved": False,
-                            }
-                        )
+                        for eta_value in ETA_SCENARIOS:
+                            gain_ucb = (
+                                float(estimate.mean_gain)
+                                + float(radius)
+                                + rho
+                                + eta_value
+                            )
+                            net = gain_ucb - lambda_cost * cost_lcb.total
+                            sensitivity_rows.append(
+                                {
+                                    "seed": seed,
+                                    "decision_round": decision_round,
+                                    "estimator": label,
+                                    "requested_window_length": length,
+                                    "n_observed": estimate.n_observed,
+                                    "n_eff": estimate.n_eff,
+                                    "diagnostic_n_eff": (
+                                        estimate.assumption_conditional_n_eff
+                                    ),
+                                    "illustrative_d": d_value,
+                                    "illustrative_eta": eta_value,
+                                    "weighted_rho": rho,
+                                    "gain_ucb": gain_ucb,
+                                    "net_ucb": net,
+                                    "numerical_stop": net <= 0.0,
+                                    "certified_stop": False,
+                                    "status": (
+                                        "illustrative_sensitivity_not_certificate"
+                                    ),
+                                    "sampling_assumption_proved": False,
+                                    "drift_assumption_calibrated": False,
+                                    "eta_guarantee_proved": False,
+                                }
+                            )
 
         seed_summaries.append(
             {
                 "seed": seed,
                 "window_rows_with_optimistic_numerical_stop": seed_numeric_stops,
-                "minimum_effective_pilots": seed_min_n,
-                "maximum_effective_pilots": seed_max_n,
+                "minimum_observed_pilots": seed_min_n,
+                "maximum_observed_pilots": seed_max_n,
+                "certified_n_eff": None,
                 "certified_stop_round": None,
                 "terminal_outcome": "budget_stop_after_round_8",
                 "r8_accuracy": r8_accuracy,
@@ -487,21 +514,54 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
             }
         )
 
-    populated = [row for row in window_rows if row["n_eff"] > 0]
+    populated = [row for row in window_rows if row["n_observed"] > 0]
     numeric = [row for row in populated if row["optimistic_numerical_stop"]]
-    sensitivity_populated = [row for row in sensitivity_rows if row["n_eff"] > 0]
+    sensitivity_populated = [
+        row for row in sensitivity_rows if row["n_observed"] > 0
+    ]
     radius_by_n: dict[int, float] = {}
     for row in populated:
-        radius_by_n[int(row["n_eff"])] = float(row["statistical_radius"])
+        radius_by_n[int(row["diagnostic_n_eff"])] = float(
+            row["statistical_radius"]
+        )
+    sensitivity_grid = [
+        {
+            "illustrative_d": d_value,
+            "illustrative_eta": eta_value,
+            "minimum_net_ucb": min(
+                (
+                    float(row["net_ucb"])
+                    for row in sensitivity_populated
+                    if row["illustrative_d"] == d_value
+                    and row["illustrative_eta"] == eta_value
+                ),
+                default=None,
+            ),
+            "numerical_stop_count": sum(
+                row["illustrative_d"] == d_value
+                and row["illustrative_eta"] == eta_value
+                and row["numerical_stop"]
+                for row in sensitivity_populated
+            ),
+            "certified_stop_count": 0,
+            "status": "illustrative_sensitivity_not_certificate",
+        }
+        for d_value in DRIFT_SCENARIOS
+        for eta_value in ETA_SCENARIOS
+    ]
     summary = {
-        "schema": "v7_time_adaptive_stopping_v1",
+        "schema": "v7_time_adaptive_stopping_v2",
         "seeds": args.seeds,
         "delta": EXPECTED["delta"],
         "lambda_cost": lambda_cost,
         "fixed_windows": list(FIXED_WINDOWS),
         "cumulative_included": True,
         "decision_rounds": list(DECISION_ROUNDS),
-        "n_tests": n_tests,
+        "n_tests_per_seed": n_tests,
+        "confidence_family_scope": (
+            "56 decision/window tests per seed at familywise delta=0.05; "
+            "no joint two-seed confidence claim"
+        ),
         "fixed_32_baseline_radius": baseline_radius,
         "time_adaptive_radius_by_effective_n": {
             str(key): value for key, value in sorted(radius_by_n.items())
@@ -509,8 +569,13 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
         "minimum_time_adaptive_radius": min(
             (float(row["statistical_radius"]) for row in populated), default=None
         ),
-        "maximum_effective_pilots": max(
-            (int(row["n_eff"]) for row in populated), default=0
+        "maximum_observed_pilots": max(
+            (int(row["n_observed"]) for row in populated), default=0
+        ),
+        "maximum_certified_n_eff": None,
+        "diagnostic_n_eff_semantics": (
+            "set equal to n_observed only for assumption-conditional radius "
+            "diagnostics; independence/martingale validity is unproved"
         ),
         "cost_lcb": cost_lcb.to_dict(),
         "cost_penalty": lambda_cost * cost_lcb.total,
@@ -520,7 +585,9 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
                 "seed": row["seed"],
                 "decision_round": row["decision_round"],
                 "estimator": row["estimator"],
+                "n_observed": row["n_observed"],
                 "n_eff": row["n_eff"],
+                "diagnostic_n_eff": row["diagnostic_n_eff"],
                 "net_ucb": row["optimistic_net_ucb_rho_eta_zero"],
                 "allowable_rho_eta": row["maximum_combined_rho_eta_for_stop"],
                 "regret": row["retrospective_accuracy_regret_vs_r8"],
@@ -541,7 +608,11 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
                 "seed": closest["seed"],
                 "decision_round": closest["decision_round"],
                 "estimator": closest["estimator"],
+                "n_observed": closest["n_observed"],
                 "n_eff": closest["n_eff"],
+                "diagnostic_n_eff": closest["diagnostic_n_eff"],
+                "historical_mean_gain": closest["historical_mean_gain"],
+                "statistical_radius": closest["statistical_radius"],
                 "optimistic_net_ucb": closest[
                     "optimistic_net_ucb_rho_eta_zero"
                 ],
@@ -578,24 +649,7 @@ def replay(args: argparse.Namespace, validation: dict[str, Any]) -> dict[str, An
             ),
             default=None,
         ),
-        "sensitivity_numerical_stops_by_d": {
-            str(d_value): sum(
-                row["illustrative_d"] == d_value and row["numerical_stop"]
-                for row in sensitivity_populated
-            )
-            for d_value in DRIFT_SCENARIOS
-        },
-        "sensitivity_min_net_ucb_by_d": {
-            str(d_value): min(
-                (
-                    float(row["net_ucb"])
-                    for row in sensitivity_populated
-                    if row["illustrative_d"] == d_value
-                ),
-                default=None,
-            )
-            for d_value in DRIFT_SCENARIOS
-        },
+        "sensitivity_grid": sensitivity_grid,
         "certified_stop_exists": False,
         "valid_online_outcome": "uncertified_continue_until_budget_stop",
         "certificate_blockers": [
@@ -635,11 +689,27 @@ def render_report(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     windows = payload["windows"]
     numeric = summary["optimistic_numerical_stop_candidates"]
-    max_n = summary["maximum_effective_pilots"]
+    max_n = summary["maximum_observed_pilots"]
     min_radius = summary["minimum_time_adaptive_radius"]
     baseline = summary["fixed_32_baseline_radius"]
     reduction = baseline - min_radius if min_radius is not None else None
     percent = reduction / baseline * 100.0 if reduction is not None else None
+    closest = summary["closest_to_stop"]
+
+    def closest_scenario(d_value: float, eta_value: float) -> dict[str, Any]:
+        for row in payload["drift_sensitivity"]:
+            if (
+                row["seed"] == closest["seed"]
+                and row["decision_round"] == closest["decision_round"]
+                and row["estimator"] == closest["estimator"]
+                and row["illustrative_d"] == d_value
+                and row["illustrative_eta"] == eta_value
+            ):
+                return row
+        raise ValueError("Closest sensitivity scenario is missing")
+
+    closest_d005 = closest_scenario(0.005, 0.005)
+    closest_d020 = closest_scenario(0.02, 0.02)
     lines = [
         "# V7 Time-Adaptive Sliding-Window Stopping",
         "",
@@ -647,15 +717,40 @@ def render_report(payload: dict[str, Any]) -> str:
         "",
         "## Executive result",
         "",
-        f"Pooling increases the largest effective sample from 32 to **{max_n}** pilots. After simultaneous Bonferroni correction over `7 decisions × (7 windows + cumulative) = {summary['n_tests']}` tests, the smallest radius is **{fmt(min_radius)}**, versus **{fmt(baseline)}** for the existing fixed-32 bound: an absolute reduction of **{fmt(reduction)}** ({fmt(percent, 2)}%).",
+        f"Pooling increases the largest observed pilot count from 32 to **{max_n}**. Under the explicitly assumption-conditional diagnostic `n_eff = n_observed`, the smallest radius is **{fmt(min_radius)}**, versus **{fmt(baseline)}** for fixed-32: a reduction of **{fmt(reduction)}** ({fmt(percent, 2)}%).",
         "",
         f"The optimistic `rho=eta=0` diagnostic produces **{summary['optimistic_numerical_stop_count']}** negative Net-UCB window/decision combinations. None is a certified STOP: pooling concentrates around a historical weighted mean, while conditional sampling, next-round drift `rho`, policy mismatch `eta`, and predecision applicability of the conditional cost-LCB remain unproved.",
         "",
         "The valid online conclusion is `uncertified_continue` through R8, followed by `budget_stop`.",
         "",
-        "## Radius by effective pilot count",
+        "## Corrected semantics: n_observed versus n_eff",
         "",
-        "| Effective pilots | Simultaneous radius | Change vs fixed-32 |",
+        "- `n_observed`: cached pilot observations physically present in the window.",
+        "- `n_eff`: sample size justified by the concentration assumptions. It is **unknown (`null`)** for these cached trajectories because cross-round conditional independence/martingale validity is not proved.",
+        "- `diagnostic_n_eff`: sets `n_observed` as the sample size only for an assumption-conditional sensitivity calculation. It must not be read as a certified effective sample size.",
+        "",
+        "## Confidence-family scope",
+        "",
+        f"Bonferroni covers **{summary['n_tests_per_seed']} tests per seed**: `7 decision rounds × (7 fixed windows + cumulative)`, with familywise `delta=0.05` separately for seed 42 and seed 43. The per-test allocation is `0.05/56`. No joint 112-test, two-seed confidence guarantee is claimed; seeds are separate replicated trajectories.",
+        "",
+        "Even this 56-test statement remains assumption-conditional: it controls the weighted average of historical conditional means only if an appropriate independence/martingale condition holds. It does not directly cover next-round policy gain.",
+        "",
+        "## Before / after validation fix",
+        "",
+        "The closest-to-STOP case remains seed 43 before R8 with L6. Validation changes the interpretation, not the cached numerical calculation:",
+        "",
+        "| Version/scenario | n_observed | Valid n_eff | Historical gain | beta | rho | eta | Net-UCB | Numerical STOP | Certified STOP |",
+        "|---|---:|---|---:|---:|---:|---:|---:|:---:|:---:|",
+        f"| Before v1 (`rho=eta=0`) | {closest['n_observed']} | implicitly {closest['diagnostic_n_eff']} | {fmt(closest['historical_mean_gain'])} | {fmt(closest['statistical_radius'])} | 0 | 0 | {fmt(closest['optimistic_net_ucb'])} | no | no |",
+        f"| After v2 optimistic diagnostic | {closest['n_observed']} | unknown; diagnostic={closest['diagnostic_n_eff']} | {fmt(closest['historical_mean_gain'])} | {fmt(closest['statistical_radius'])} | 0 | 0 | {fmt(closest['optimistic_net_ucb'])} | no | no |",
+        f"| After v2 illustrative `d=.005, eta=.005` | {closest['n_observed']} | unknown; diagnostic={closest['diagnostic_n_eff']} | {fmt(closest['historical_mean_gain'])} | {fmt(closest['statistical_radius'])} | {fmt(closest_d005['weighted_rho'])} | 0.005000 | {fmt(closest_d005['net_ucb'])} | no | no |",
+        f"| After v2 illustrative `d=.02, eta=.02` | {closest['n_observed']} | unknown; diagnostic={closest['diagnostic_n_eff']} | {fmt(closest['historical_mean_gain'])} | {fmt(closest['statistical_radius'])} | {fmt(closest_d020['weighted_rho'])} | 0.020000 | {fmt(closest_d020['net_ucb'])} | no | no |",
+        "",
+        "The base radius, historical gain, and optimistic Net-UCB do not change because the cached observations and frozen `lambda/delta` did not change. The safety status is now explicit: without a valid `n_eff`, the radius is diagnostic, never a certified bound. Positive illustrative `rho/eta` only increase Net-UCB.",
+        "",
+        "## Radius by assumption-conditional diagnostic sample count",
+        "",
+        "| n_observed (= diagnostic_n_eff only under assumption) | Simultaneous radius | Change vs fixed-32 |",
         "|---:|---:|---:|",
     ]
     for n_value, radius in summary["time_adaptive_radius_by_effective_n"].items():
@@ -665,19 +760,19 @@ def render_report(payload: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "The L=1 time-adaptive radius is wider than the fixed-32 baseline because the time-adaptive experiment protects the complete family of 56 tests. Larger windows eventually overcome that correction through larger `n_eff`.",
+            "The L=1 radius is wider than fixed-32 because the time-adaptive experiment protects 56 tests per seed. Larger windows overcome that correction numerically, conditional on treating the observations as valid concentration units.",
             "",
             "## Historical-window estimates",
             "",
-            "| Seed | Pre-round | Window | Calendar rounds | Observed rounds | n_eff | Mean | Radius | Net-UCB rho=eta=0 | Numeric STOP |",
-            "|---:|---:|---|---|---|---:|---:|---:|---:|:---:|",
+            "| Seed | Pre-round | Window | Observed rounds | n_observed | Valid n_eff | Diagnostic n_eff | Mean | Radius | Net-UCB rho=eta=0 | Numeric STOP |",
+            "|---:|---:|---|---|---:|---|---:|---:|---:|---:|:---:|",
         ]
     )
     # Keep the report readable: show unique fixed windows and cumulative, but
     # retain every row in CSV/JSON.
     for row in windows:
         lines.append(
-            f"| {row['seed']} | {row['decision_round']} | {row['estimator']} | {row['calendar_rounds']} | {row['observed_rounds']} | {row['n_eff']} | {fmt(row['historical_mean_gain'])} | {fmt(row['statistical_radius'])} | {fmt(row['optimistic_net_ucb_rho_eta_zero'])} | {'yes' if row['optimistic_numerical_stop'] else 'no'} |"
+            f"| {row['seed']} | {row['decision_round']} | {row['estimator']} | {row['observed_rounds']} | {row['n_observed']} | {fmt(row['n_eff'], 0)} | {row['diagnostic_n_eff']} | {fmt(row['historical_mean_gain'])} | {fmt(row['statistical_radius'])} | {fmt(row['optimistic_net_ucb_rho_eta_zero'])} | {'yes' if row['optimistic_numerical_stop'] else 'no'} |"
         )
     lines.extend(
         [
@@ -686,14 +781,14 @@ def render_report(payload: dict[str, Any]) -> str:
             "",
             "## Optimistic numerical STOP candidates",
             "",
-            "| Seed | Pre-round | Window | n_eff | Net-UCB | Max rho+eta allowed | Post-hoc regret | Post-hoc cost avoided |",
+            "| Seed | Pre-round | Window | n_observed | Net-UCB | Max rho+eta allowed | Post-hoc regret | Post-hoc cost avoided |",
             "|---:|---:|---|---:|---:|---:|---:|---:|",
         ]
     )
     if numeric:
         for row in numeric:
             lines.append(
-                f"| {row['seed']} | {row['decision_round']} | {row['estimator']} | {row['n_eff']} | {fmt(row['net_ucb'])} | {fmt(row['allowable_rho_eta'])} | {fmt(row['regret'])} | {fmt(row['posthoc_cost_avoided'])} |"
+                f"| {row['seed']} | {row['decision_round']} | {row['estimator']} | {row['n_observed']} | {fmt(row['net_ucb'])} | {fmt(row['allowable_rho_eta'])} | {fmt(row['regret'])} | {fmt(row['posthoc_cost_avoided'])} |"
             )
     else:
         lines.append("| — | — | — | — | — | — | — | — |")
@@ -702,22 +797,24 @@ def render_report(payload: dict[str, Any]) -> str:
             "",
             "These are diagnostics, not policy decisions. Accuracy regret and avoided historical costs are computed only after identifying a numerical candidate and never enter the stopping calculation.",
             "",
-            "## Drift sensitivity",
+            "## Illustrative rho / eta sensitivity",
             "",
-            "| Illustrative d | Numerical STOP combinations | Status |",
-            "|---:|---:|---|",
+            "| Illustrative d | Illustrative eta | Minimum Net-UCB | Numerical STOP rows | Certified STOP rows |",
+            "|---:|---:|---:|---:|---:|",
         ]
     )
-    for d_value, count in summary["sensitivity_numerical_stops_by_d"].items():
+    for item in summary["sensitivity_grid"]:
         lines.append(
-            f"| {float(d_value):.3f} | {count} (minimum Net-UCB {fmt(summary['sensitivity_min_net_ucb_by_d'][d_value])}) | illustrative, eta=0; not calibrated |"
+            f"| {item['illustrative_d']:.3f} | {item['illustrative_eta']:.3f} | {fmt(item['minimum_net_ucb'])} | {item['numerical_stop_count']} | {item['certified_stop_count']} |"
         )
     lines.extend(
         [
             "",
-            "For the stated stability scenario, each observation pays `d × age`; older windows can reduce beta while increasing rho. Therefore adding temporal drift never tightens the total bound relative to the `d=0` diagnostic. Historical maximum drift is reported in CSV/JSON only and is not used to set d.",
+            "Each observation pays illustrative `rho = d × age` after observation weighting; eta is an independent hypothetical non-negative mismatch allowance. These scenarios are not calibrated bounds and cannot certify STOP. Increasing either term cannot tighten Net-UCB. Historical maximum drift is never used to fit d.",
             "",
             "## Scientific validity",
+            "",
+            "`beta`, `rho`, and `eta` are now validated as finite and non-negative; NaN, infinity, and negative values are rejected before any decision, preventing malformed uncertainty from producing a false certified STOP.",
             "",
             "The simultaneous radius would cover the observation-weighted average of historical conditional means under bounded width-one observations plus an appropriate conditional-independence or martingale concentration assumption. It does not automatically cover next-round gain.",
             "",

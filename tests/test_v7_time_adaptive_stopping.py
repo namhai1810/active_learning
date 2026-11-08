@@ -19,7 +19,9 @@ def test_window_is_strictly_predecision_and_excludes_supplied_future_rounds():
     )
     assert estimate.calendar_rounds == (1, 2, 3)
     assert estimate.maximum_source_round == 3
-    assert estimate.n_eff == 2
+    assert estimate.n_observed == 2
+    assert estimate.n_eff is None
+    assert estimate.assumption_conditional_n_eff == 2
     assert estimate.mean_gain == pytest.approx(0.15)
     assert estimate.strict_predecision_available is True
 
@@ -31,7 +33,8 @@ def test_observation_weighting_does_not_average_round_means_equally():
         window_length=2,
     )
     assert estimate.observation_counts_by_round == {2: 1, 3: 3}
-    assert estimate.n_eff == 4
+    assert estimate.n_observed == 4
+    assert estimate.n_eff is None
     assert estimate.mean_gain == pytest.approx(0.75)
     assert estimate.weighted_mean_of_round_means == pytest.approx(0.75)
     assert estimate.mean_gain != pytest.approx(0.5)
@@ -47,7 +50,8 @@ def test_missing_pilot_round_stays_in_calendar_but_has_zero_weight():
     assert estimate.calendar_window_length == 3
     assert estimate.zero_pilot_rounds == (3,)
     assert estimate.observed_rounds == (2, 4)
-    assert estimate.n_eff == 3
+    assert estimate.n_observed == 3
+    assert estimate.n_eff is None
 
 
 def test_cumulative_history_starts_at_round_one():
@@ -57,6 +61,25 @@ def test_cumulative_history_starts_at_round_one():
     assert estimate.estimator == "cumulative"
     assert estimate.calendar_rounds == (1, 2, 3)
     assert estimate.zero_pilot_rounds == (1,)
+
+
+def test_effective_sample_size_requires_explicit_concentration_assumption():
+    unproved = historical_window_estimate(
+        {2: [0.1] * 32}, decision_round=3, window_length=1
+    )
+    validated = historical_window_estimate(
+        {2: [0.1] * 32},
+        decision_round=3,
+        window_length=1,
+        concentration_assumptions_valid=True,
+    )
+    assert unproved.n_observed == validated.n_observed == 32
+    assert unproved.n_eff is None
+    assert unproved.concentration_assumption_status == (
+        "unproved_independence_or_martingale"
+    )
+    assert validated.n_eff == 32
+    assert validated.concentration_assumption_status == "validated_by_caller"
 
 
 def test_bonferroni_family_counts_all_windows_and_decisions():
@@ -122,7 +145,10 @@ def test_unknown_assumptions_prohibit_numerical_stop_certificate():
 
 def test_conditional_cost_lcb_is_not_silently_promoted():
     estimate = historical_window_estimate(
-        {2: [-0.5] * 32}, decision_round=3, window_length=1
+        {2: [-0.5] * 32},
+        decision_round=3,
+        window_length=1,
+        concentration_assumptions_valid=True,
     )
     decision = assess_time_adaptive_decision(
         estimate=estimate,
@@ -144,7 +170,10 @@ def test_conditional_cost_lcb_is_not_silently_promoted():
 
 def test_all_valid_assumptions_allow_nonpositive_certificate():
     estimate = historical_window_estimate(
-        {2: [-0.5] * 32}, decision_round=3, window_length=1
+        {2: [-0.5] * 32},
+        decision_round=3,
+        window_length=1,
+        concentration_assumptions_valid=True,
     )
     decision = assess_time_adaptive_decision(
         estimate=estimate,
@@ -189,7 +218,10 @@ def test_retrospective_metrics_never_change_policy_decision():
 
 def test_budget_stop_is_separate_from_certified_stop():
     estimate = historical_window_estimate(
-        {2: [0.1] * 32}, decision_round=3, window_length=1
+        {2: [0.1] * 32},
+        decision_round=3,
+        window_length=1,
+        concentration_assumptions_valid=True,
     )
     decision = assess_time_adaptive_decision(
         estimate=estimate,
@@ -206,3 +238,29 @@ def test_budget_stop_is_separate_from_certified_stop():
     )
     assert decision.certification == "budget_stop"
     assert decision.reason == "maximum_budget_reached_not_gain_cost_certificate"
+
+
+@pytest.mark.parametrize("field", ["statistical_radius", "rho", "eta"])
+@pytest.mark.parametrize("bad_value", [-0.01, float("nan"), float("inf")])
+def test_invalid_uncertainty_cannot_create_false_certificate(field, bad_value):
+    estimate = historical_window_estimate(
+        {2: [-0.5] * 32},
+        decision_round=3,
+        window_length=1,
+        concentration_assumptions_valid=True,
+    )
+    kwargs = {
+        "estimate": estimate,
+        "statistical_radius": 0.1,
+        "rho": 0.0,
+        "eta": 0.0,
+        "cost_lcb": 0.2264,
+        "lambda_cost": 0.2,
+        "sampling_assumptions_valid": True,
+        "drift_assumption_valid": True,
+        "policy_mismatch_assumption_valid": True,
+        "cost_lcb_applicable_predecision": True,
+    }
+    kwargs[field] = bad_value
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        assess_time_adaptive_decision(**kwargs)

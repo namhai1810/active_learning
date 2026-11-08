@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
+  <style>text{font-family:'DejaVu Sans',Arial,sans-serif!important}</style>
+  <title id="title">Flow của Time-Adaptive Sliding-Window Stopping</title>
+  <desc id="desc">Historical pilots from completed rounds are pooled by a predeclared window, then statistical, temporal, policy mismatch, and cost terms form Net-UCB. Unknown assumptions prevent certification.</desc>
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#071426"/><stop offset="1" stop-color="#15314d"/></linearGradient></defs>
+  <rect width="1200" height="430" rx="22" fill="url(#bg)"/>
+  <text x="600" y="44" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="24" font-weight="700" fill="#ecf3ff">Time-Adaptive pre-round decision: what evidence is available?</text>
+  <g font-family="Inter,Arial,sans-serif">
+    <rect x="35" y="92" width="205" height="130" rx="15" fill="#183b5b" stroke="#60a5fa" stroke-width="2"/>
+    <text x="137" y="123" text-anchor="middle" font-size="17" font-weight="700" fill="#ecf3ff">Completed pilots</text>
+    <text x="137" y="151" text-anchor="middle" font-size="14" fill="#b8c7db">Only rounds &lt; t+1</text>
+    <text x="137" y="176" text-anchor="middle" font-size="14" fill="#b8c7db">0-pilot rounds have weight 0</text>
+    <text x="137" y="201" text-anchor="middle" font-size="14" fill="#5eead4">No future leakage</text>
+
+    <rect x="280" y="92" width="205" height="130" rx="15" fill="#193d50" stroke="#5eead4" stroke-width="2"/>
+    <text x="382" y="123" text-anchor="middle" font-size="17" font-weight="700" fill="#ecf3ff">Window estimator</text>
+    <text x="382" y="151" text-anchor="middle" font-size="14" fill="#b8c7db">L = 1…7 + cumulative</text>
+    <text x="382" y="176" text-anchor="middle" font-size="14" fill="#b8c7db">Observation-weighted mean</text>
+    <text x="382" y="201" text-anchor="middle" font-size="14" fill="#b8c7db">n_observed = 32…160</text>
+
+    <rect x="525" y="92" width="205" height="130" rx="15" fill="#302d54" stroke="#a78bfa" stroke-width="2"/>
+    <text x="627" y="123" text-anchor="middle" font-size="17" font-weight="700" fill="#ecf3ff">Uncertainty</text>
+    <text x="627" y="151" text-anchor="middle" font-size="14" fill="#b8c7db">β: 56-test Bonferroni</text>
+    <text x="627" y="176" text-anchor="middle" font-size="14" fill="#fbbf24">ρ: temporal drift unknown</text>
+    <text x="627" y="201" text-anchor="middle" font-size="14" fill="#fbbf24">η: policy mismatch unknown</text>
+
+    <rect x="770" y="92" width="185" height="130" rx="15" fill="#473529" stroke="#fb923c" stroke-width="2"/>
+    <text x="862" y="123" text-anchor="middle" font-size="17" font-weight="700" fill="#ecf3ff">Cost penalty</text>
+    <text x="862" y="151" text-anchor="middle" font-size="14" fill="#b8c7db">λ = 0.2</text>
+    <text x="862" y="176" text-anchor="middle" font-size="14" fill="#b8c7db">Cost-LCB = $0.2264</text>
+    <text x="862" y="201" text-anchor="middle" font-size="13" fill="#fbbf24">Conditional applicability</text>
+
+    <rect x="995" y="92" width="170" height="130" rx="15" fill="#422936" stroke="#fb7185" stroke-width="2"/>
+    <text x="1080" y="123" text-anchor="middle" font-size="17" font-weight="700" fill="#ecf3ff">Certificate gate</text>
+    <text x="1080" y="151" text-anchor="middle" font-size="14" fill="#b8c7db">U_net ≤ 0?</text>
+    <text x="1080" y="178" text-anchor="middle" font-size="14" fill="#fb7185">Assumptions valid?</text>
+    <text x="1080" y="204" text-anchor="middle" font-size="14" font-weight="700" fill="#fbbf24">Uncertified CONTINUE</text>
+  </g>
+  <g fill="#9fb0c7">
+    <path d="M245 150h25l-8-8 5-5 17 17-17 17-5-5 8-8h-25z"/>
+    <path d="M490 150h25l-8-8 5-5 17 17-17 17-5-5 8-8h-25z"/>
+    <path d="M735 150h25l-8-8 5-5 17 17-17 17-5-5 8-8h-25z"/>
+    <path d="M960 150h25l-8-8 5-5 17 17-17 17-5-5 8-8h-25z"/>
+  </g>
+  <rect x="150" y="278" width="900" height="92" rx="15" fill="#0d2138" stroke="#29445f"/>
+  <text x="600" y="310" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="700" fill="#ecf3ff">U_net = Δ̂_history + β + ρ + η − λ L_C</text>
+  <text x="600" y="340" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="15" fill="#b8c7db">Radius drops 47.67%, but best optimistic Net-UCB remains +0.111058</text>
+  <text x="600" y="361" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="14" fill="#fbbf24">No numerical STOP · No certified STOP</text>
+  <text x="600" y="405" text-anchor="middle" font-family="Inter,Arial,sans-serif" font-size="13" fill="#8fa4be">Historical pooling reduces sampling uncertainty, not temporal target shift.</text>
+</svg>

@@ -12,18 +12,27 @@ window with zero statistical weight.
 
 The estimator pools individual pilot gains, not round means, so unequal pilot
 counts receive the correct observation weights. It reports calendar length,
-round-level counts, effective observations, historical mean, and sample
-variance.
+round-level counts, historical mean, and sample variance. Sample-size fields
+are deliberately separated:
+
+- `n_observed` is the number of cached pilot observations;
+- `n_eff` is populated only if a concentration-valid independence/martingale
+  assumption is explicitly established;
+- `diagnostic_n_eff = n_observed` is used only for assumption-conditional CPU
+  sensitivity and is not a certified effective sample size.
 
 ## Simultaneous radius
 
-The predeclared family contains:
+The predeclared family within each seed contains:
 
-`7 decision rounds × (7 fixed windows + cumulative) = 56 tests`.
+`7 decision rounds × (7 fixed windows + cumulative) = 56 tests/seed`.
 
 For width-one bounded gains, the diagnostic radius is
 
-`sqrt(log(2*56/0.05)/(2*n_eff))`.
+`sqrt(log(2*56/0.05)/(2*diagnostic_n_eff))`.
+
+Familywise `delta=0.05` is allocated separately inside seed 42 and seed 43.
+The report does not claim a joint two-seed 112-test confidence guarantee.
 
 Under a suitable conditional-independence or martingale assumption, this
 controls deviations from the observation-weighted average of historical
@@ -38,9 +47,13 @@ is age-weighted:
 
 `rho = sum_s m_s*d*(t+1-s) / sum_s m_s`.
 
-Scenarios `d={0, 0.005, 0.01, 0.02}` use hypothetical `eta=0`. Neither is
-calibrated from retrospective trajectories. Historical maximum drift is only a
-diagnostic and never becomes a theoretical bound.
+Scenarios `d={0, 0.005, 0.01, 0.02}` are crossed with illustrative
+`eta={0, 0.005, 0.01, 0.02}`. Neither term is calibrated from retrospective
+trajectories. Historical maximum drift is only a diagnostic and never becomes
+a theoretical bound.
+
+`beta`, `rho`, and `eta` must be finite and non-negative. Negative values,
+NaN, and infinity are rejected before the decision rule is evaluated.
 
 ## Cost and certification
 

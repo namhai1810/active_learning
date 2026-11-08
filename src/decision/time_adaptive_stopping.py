@@ -30,7 +30,10 @@ class HistoricalWindowEstimate:
     observation_counts_by_round: dict[int, int]
     observed_rounds: tuple[int, ...]
     zero_pilot_rounds: tuple[int, ...]
-    n_eff: int
+    n_observed: int
+    n_eff: int | None
+    assumption_conditional_n_eff: int
+    concentration_assumption_status: str
     mean_gain: float | None
     sample_variance: float | None
     weighted_mean_of_round_means: float | None
@@ -93,6 +96,7 @@ def historical_window_estimate(
     *,
     decision_round: int,
     window_length: int | None,
+    concentration_assumptions_valid: bool = False,
 ) -> HistoricalWindowEstimate:
     """Pool eligible historical observations with observation-level weights.
 
@@ -115,15 +119,21 @@ def historical_window_estimate(
         if current:
             round_means.append((round_index, statistics.fmean(current), len(current)))
 
-    n_eff = len(values)
+    n_observed = len(values)
+    # Cached pilots establish how many observations exist, not that their
+    # cross-round dependence satisfies a concentration theorem.  ``n_eff`` is
+    # therefore unknown until that assumption is explicitly supplied.  The
+    # observed count remains available as an assumption-conditional diagnostic
+    # sample size for the offline sensitivity replay.
+    n_eff = n_observed if concentration_assumptions_valid else None
     mean = statistics.fmean(values) if values else None
     variance = statistics.variance(values) if len(values) >= 2 else (
         0.0 if len(values) == 1 else None
     )
     weighted_round_mean = (
         math.fsum(mean_value * count for _, mean_value, count in round_means)
-        / n_eff
-        if n_eff
+        / n_observed
+        if n_observed
         else None
     )
     observed_rounds = tuple(index for index in rounds if counts[index] > 0)
@@ -140,7 +150,14 @@ def historical_window_estimate(
         observation_counts_by_round=counts,
         observed_rounds=observed_rounds,
         zero_pilot_rounds=zero_rounds,
+        n_observed=n_observed,
         n_eff=n_eff,
+        assumption_conditional_n_eff=n_observed,
+        concentration_assumption_status=(
+            "validated_by_caller"
+            if concentration_assumptions_valid
+            else "unproved_independence_or_martingale"
+        ),
         mean_gain=mean,
         sample_variance=variance,
         weighted_mean_of_round_means=weighted_round_mean,
@@ -217,6 +234,14 @@ def assess_time_adaptive_decision(
     # Retrospective fields are accepted only to make accidental coupling
     # testable; policy calculations deliberately never read them.
     del retrospective_metrics
+
+    def validate_uncertainty(name: str, value: float | None) -> None:
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise ValueError(f"{name} must be finite and non-negative when provided")
+
+    validate_uncertainty("statistical_radius", statistical_radius)
+    validate_uncertainty("rho", rho)
+    validate_uncertainty("eta", eta)
     if not math.isfinite(cost_lcb) or cost_lcb < 0:
         raise ValueError("cost_lcb must be finite and non-negative")
     if not math.isfinite(lambda_cost) or lambda_cost < 0:
@@ -240,7 +265,7 @@ def assess_time_adaptive_decision(
         )
 
     issues: list[str] = []
-    if estimate.n_eff == 0 or estimate.mean_gain is None:
+    if estimate.n_observed == 0 or estimate.mean_gain is None:
         issues.append("no_eligible_historical_pilots")
     if not estimate.strict_predecision_available:
         issues.append("future_round_leakage")
@@ -248,6 +273,8 @@ def assess_time_adaptive_decision(
         issues.append("statistical_radius_missing")
     if not sampling_assumptions_valid:
         issues.append("conditional_independence_or_martingale_assumption_unproved")
+    elif estimate.n_eff is None:
+        issues.append("valid_effective_sample_size_missing")
     if rho is None or not drift_assumption_valid:
         issues.append("temporal_drift_bound_unknown")
     if eta is None or not policy_mismatch_assumption_valid:
