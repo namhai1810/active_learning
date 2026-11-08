@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="470" viewBox="0 0 1500 470">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#081426"/><stop offset="1" stop-color="#12233f"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="6" stdDeviation="8" flood-opacity=".28"/></filter>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0L9 4.5L0 9z" fill="#5eead4"/></marker>
+    <style>.t{font-family:Inter,Arial,sans-serif;fill:#e5edf8}.muted{fill:#9fb0c7}.card{fill:#152a48;stroke:#315277;stroke-width:2}.h{font-weight:700;font-size:24px}.b{font-size:17px}.small{font-size:14px}.accent{fill:#5eead4}.warn{fill:#fbbf24}</style>
+  </defs>
+  <rect width="1500" height="470" rx="24" fill="url(#bg)"/>
+  <text x="60" y="62" class="t h" font-size="29">V7 Cost-Aware — tiến hóa diagnostic (06–08/11/2026)</text>
+  <text x="60" y="92" class="muted b">Giữ nguyên V7 training; chỉ bổ sung confidence, cost audit và retrospective simulation</text>
+  <path d="M155 220H1340" stroke="#5eead4" stroke-width="4" marker-end="url(#arrow)" opacity=".8"/>
+  <g filter="url(#shadow)">
+    <rect class="card" x="45" y="135" width="250" height="205" rx="18"/>
+    <circle cx="155" cy="220" r="13" fill="#5eead4"/>
+    <text x="70" y="175" class="accent h">V7 preserved</text>
+    <text x="70" y="270" class="t b">8 rounds × 32</text><text x="70" y="298" class="muted b">Stateful LoRA + AdamW</text><text x="70" y="326" class="muted b">Seeds 42/43 complete</text>
+    <rect class="card" x="335" y="135" width="250" height="205" rx="18"/>
+    <circle cx="445" cy="220" r="13" fill="#5eead4"/>
+    <text x="360" y="175" class="accent h">Range-Aware</text>
+    <text x="360" y="270" class="t b">b: .593 → .297</text><text x="360" y="298" class="muted b">Support width = 1</text><text x="360" y="326" class="muted b">Still no STOP</text>
+    <rect class="card" x="625" y="135" width="250" height="205" rx="18"/>
+    <circle cx="735" cy="220" r="13" fill="#5eead4"/>
+    <text x="650" y="175" class="accent h">One-step audit</text>
+    <text x="650" y="270" class="t b">14 observed updates</text><text x="650" y="298" class="muted b">Net gain all negative</text><text x="650" y="326" class="muted b">UCB remains positive</text>
+    <rect class="card" x="915" y="135" width="250" height="205" rx="18"/>
+    <circle cx="1025" cy="220" r="13" fill="#5eead4"/>
+    <text x="940" y="175" class="accent h">Cost v3</text>
+    <text x="940" y="270" class="t b">Sunk ≠ decision</text><text x="940" y="298" class="muted b">Replay 22/22 exact</text><text x="940" y="326" class="muted b">Totals still partial</text>
+    <rect class="card" x="1205" y="135" width="250" height="205" rx="18"/>
+    <circle cx="1315" cy="220" r="13" fill="#fbbf24"/>
+    <text x="1230" y="175" class="warn h">Adaptive v4</text>
+    <text x="1230" y="270" class="t b">4 → 8 → 16 → 32</text><text x="1230" y="298" class="muted b">−86.39% pilot GPU h</text><text x="1230" y="326" class="warn b">Partial: rate missing</text>
+  </g>
+  <text x="60" y="414" class="muted small">Online evidence</text><line x1="180" y1="409" x2="275" y2="409" stroke="#5eead4" stroke-width="3"/>
+  <text x="330" y="414" class="muted small">Retrospective diagnostic</text><line x1="525" y1="409" x2="620" y2="409" stroke="#7dd3fc" stroke-width="3"/>
+  <text x="675" y="414" class="muted small">Partial / limitation</text><line x1="825" y1="409" x2="920" y2="409" stroke="#fbbf24" stroke-width="3"/>
+</svg>

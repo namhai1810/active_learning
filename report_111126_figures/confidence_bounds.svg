@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="520" viewBox="0 0 1300 520">
+  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#081426"/><stop offset="1" stop-color="#132b46"/></linearGradient><style>.t{font-family:Inter,Arial,sans-serif;fill:#e8eef8}.m{fill:#9fb0c7}.h{font-size:27px;font-weight:700}.b{font-size:18px}.s{font-size:15px}</style></defs>
+  <rect width="1300" height="520" rx="24" fill="url(#bg)"/>
+  <text x="55" y="58" class="t h">Range-Aware làm bound chặt hơn, nhưng chưa tạo STOP</text>
+  <text x="55" y="91" class="m b">STOP threshold: Net-UCB ≤ 0 · primary λ = 0.2</text>
+  <text x="70" y="155" class="t b">Confidence radius</text>
+  <rect x="300" y="126" width="750" height="43" rx="9" fill="#334b69"/><rect x="300" y="126" width="750" height="43" rx="9" fill="#fb7185" opacity=".82"/>
+  <text x="1065" y="155" class="t b">v2  0.593443</text>
+  <rect x="300" y="190" width="750" height="43" rx="9" fill="#334b69"/><rect x="300" y="190" width="375" height="43" rx="9" fill="#5eead4" opacity=".9"/>
+  <text x="1065" y="219" class="t b">v2.1  0.296721</text>
+  <text x="70" y="218" class="m b">50% reduction</text>
+  <line x1="300" y1="314" x2="1100" y2="314" stroke="#7185a1" stroke-width="2"/>
+  <line x1="300" y1="292" x2="300" y2="420" stroke="#fbbf24" stroke-width="4"/>
+  <text x="278" y="450" class="t s">0 = STOP boundary</text>
+  <text x="55" y="352" class="t b">Closest Net-UCB</text>
+  <rect x="300" y="334" width="800" height="34" rx="7" fill="#334b69"/><rect x="300" y="334" width="286" height="34" rx="7" fill="#60a5fa"/>
+  <text x="600" y="358" class="t b">Seed 42 R3: +0.071633 → CONTINUE</text>
+  <rect x="300" y="384" width="800" height="34" rx="7" fill="#334b69"/><rect x="300" y="384" width="193" height="34" rx="7" fill="#a78bfa"/>
+  <text x="510" y="408" class="t b">Seed 43 R3: +0.048196 → CONTINUE</text>
+  <text x="55" y="490" class="m s">Scale của Net-UCB bars được phóng đại để nhìn rõ khoảng cách tới 0; giá trị số trên nhãn là giá trị thực.</text>
+</svg>

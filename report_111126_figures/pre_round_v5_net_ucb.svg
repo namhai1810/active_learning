@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="430" viewBox="0 0 900 430" role="img" aria-labelledby="title desc">
+  <title id="title">Pre-Round Stopping v5 Net-UCB</title>
+  <desc id="desc">Net-UCB remains positive for seeds 42 and 43 before rounds 2 through 8, therefore no certified stop occurs.</desc>
+  <rect width="900" height="430" fill="#ffffff"/>
+  <text x="450" y="30" text-anchor="middle" font-family="sans-serif" font-size="20" font-weight="700" fill="#172033">Pre-Round v5: Net-UCB vẫn dương ở mọi decision</text>
+  <text x="450" y="53" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#5b6475">STOP chỉ khi Net-UCB ≤ 0; λ=0.2, valid cost lower bound = $0.02</text>
+  <rect x="92" y="340" width="718" height="42" fill="#fff2f2"/>
+  <line x1="92" y1="80" x2="92" y2="382" stroke="#667085" stroke-width="1.5"/>
+  <line x1="92" y1="340" x2="810" y2="340" stroke="#b42318" stroke-width="2"/>
+  <line x1="92" y1="275" x2="810" y2="275" stroke="#e5e7eb"/>
+  <line x1="92" y1="210" x2="810" y2="210" stroke="#e5e7eb"/>
+  <line x1="92" y1="145" x2="810" y2="145" stroke="#e5e7eb"/>
+  <line x1="92" y1="80" x2="810" y2="80" stroke="#e5e7eb"/>
+  <g font-family="sans-serif" font-size="12" fill="#667085" text-anchor="end">
+    <text x="82" y="344">0.0</text><text x="82" y="279">0.1</text><text x="82" y="214">0.2</text><text x="82" y="149">0.3</text><text x="82" y="84">0.4</text>
+  </g>
+  <text x="45" y="215" transform="rotate(-90 45 215)" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#344054">Pre-Round Net-UCB</text>
+  <polyline points="120,94.3 230,97.0 340,121.2 450,131.7 560,108.8 670,133.1 780,162.7" fill="none" stroke="#2563eb" stroke-width="3"/>
+  <polyline points="120,94.8 230,96.8 340,111.6 450,148.3 560,139.1 670,119.0 780,162.4" fill="none" stroke="#f97316" stroke-width="3"/>
+  <g fill="#2563eb">
+    <circle cx="120" cy="94.3" r="4"/><circle cx="230" cy="97.0" r="4"/><circle cx="340" cy="121.2" r="4"/><circle cx="450" cy="131.7" r="4"/><circle cx="560" cy="108.8" r="4"/><circle cx="670" cy="133.1" r="4"/><circle cx="780" cy="162.7" r="4"/>
+  </g>
+  <g fill="#f97316">
+    <circle cx="120" cy="94.8" r="4"/><circle cx="230" cy="96.8" r="4"/><circle cx="340" cy="111.6" r="4"/><circle cx="450" cy="148.3" r="4"/><circle cx="560" cy="139.1" r="4"/><circle cx="670" cy="119.0" r="4"/><circle cx="780" cy="162.4" r="4"/>
+  </g>
+  <g font-family="sans-serif" font-size="12" fill="#475467" text-anchor="middle">
+    <text x="120" y="402">R2</text><text x="230" y="402">R3</text><text x="340" y="402">R4</text><text x="450" y="402">R5</text><text x="560" y="402">R6</text><text x="670" y="402">R7</text><text x="780" y="402">R8</text>
+  </g>
+  <line x1="610" y1="62" x2="638" y2="62" stroke="#2563eb" stroke-width="3"/><text x="646" y="66" font-family="sans-serif" font-size="12" fill="#344054">Seed 42</text>
+  <line x1="710" y1="62" x2="738" y2="62" stroke="#f97316" stroke-width="3"/><text x="746" y="66" font-family="sans-serif" font-size="12" fill="#344054">Seed 43</text>
+  <text x="800" y="360" text-anchor="end" font-family="sans-serif" font-size="12" fill="#b42318">Certified STOP region</text>
+</svg>

@@ -14,6 +14,12 @@ from src.decision.cost_model import (
     compute_cost,
     cost_rates_from_config,
 )
+from src.decision.next_round_cost_aware import (
+    NextRoundDecision,
+    NextRoundEvidence,
+    PreDecisionBound,
+    decide_next_round,
+)
 
 __all__ = (
     "DecisionCandidate",
@@ -27,4 +33,8 @@ __all__ = (
     "CostUsage",
     "compute_cost",
     "cost_rates_from_config",
+    "NextRoundDecision",
+    "NextRoundEvidence",
+    "PreDecisionBound",
+    "decide_next_round",
 )
