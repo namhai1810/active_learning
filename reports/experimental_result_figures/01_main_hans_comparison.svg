@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="720" viewBox="0 0 1100 720">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:Inter,Arial,sans-serif;fill:#172033}.title{font-size:22px;font-weight:700}.axis{font-size:13px}.small{font-size:11px}.grid{stroke:#dbe3ed;stroke-width:1}.base{stroke:#475569;stroke-width:1.2}</style>
+<text x="550.0" y="30.0" class="title" text-anchor="middle">Budget-128 sealed-HANS comparison (seed 42)</text>
+<line x1="270.0" y1="60" x2="270.0" y2="665" class="grid"/>
+<text x="270.0" y="698.0" class="small" text-anchor="middle">63%</text>
+<line x1="444.44444444444446" y1="60" x2="444.44444444444446" y2="665" class="grid"/>
+<text x="444.4" y="698.0" class="small" text-anchor="middle">64%</text>
+<line x1="618.8888888888889" y1="60" x2="618.8888888888889" y2="665" class="grid"/>
+<text x="618.9" y="698.0" class="small" text-anchor="middle">65%</text>
+<line x1="793.3333333333333" y1="60" x2="793.3333333333333" y2="665" class="grid"/>
+<text x="793.3" y="698.0" class="small" text-anchor="middle">66%</text>
+<line x1="967.7777777777777" y1="60" x2="967.7777777777777" y2="665" class="grid"/>
+<text x="967.8" y="698.0" class="small" text-anchor="middle">67%</text>
+<text x="262.0" y="86.2" class="small" text-anchor="end">Zero-shot Qwen</text>
+<rect x="270" y="64.0" width="148.85925925925898" height="27.42666666666667" rx="2" fill="#64748b"/>
+<text x="423.9" y="85.0" class="small" text-anchor="start">63.85</text>
+<text x="262.0" y="126.5" class="small" text-anchor="end">Random synthetic</text>
+<rect x="270" y="104.33333333333334" width="254.6888888888878" height="27.42666666666667" rx="2" fill="#f59e0b"/>
+<text x="529.7" y="125.3" class="small" text-anchor="start">64.46</text>
+<text x="262.0" y="166.9" class="small" text-anchor="end">BADGE (synthetic)</text>
+<rect x="270" y="144.66666666666669" width="296.55555555555605" height="27.42666666666667" rx="2" fill="#8b5cf6"/>
+<text x="571.6" y="165.6" class="small" text-anchor="start">64.70</text>
+<text x="262.0" y="207.2" class="small" text-anchor="end">Margin (synthetic)</text>
+<rect x="270" y="185.0" width="297.71851851851795" height="27.42666666666667" rx="2" fill="#8b5cf6"/>
+<text x="572.7" y="206.0" class="small" text-anchor="start">64.71</text>
+<text x="262.0" y="247.5" class="small" text-anchor="end">Verified V7 consolidation</text>
+<rect x="270" y="225.33333333333334" width="300.04444444444425" height="27.42666666666667" rx="2" fill="#059669"/>
+<text x="575.0" y="246.3" class="small" text-anchor="start">64.72</text>
+<text x="262.0" y="287.9" class="small" text-anchor="end">CAL (MNLI)</text>
+<rect x="270" y="265.6666666666667" width="305.8592592592587" height="27.42666666666667" rx="2" fill="#2563eb"/>
+<text x="580.9" y="286.6" class="small" text-anchor="start">64.75</text>
+<text x="262.0" y="328.2" class="small" text-anchor="end">Verified V7 continuation</text>
+<rect x="270" y="306.0" width="348.88888888888886" height="27.42666666666667" rx="2" fill="#059669"/>
+<text x="623.9" y="327.0" class="small" text-anchor="start">65.00</text>
+<text x="262.0" y="368.5" class="small" text-anchor="end">CAL (synthetic)</text>
+<rect x="270" y="346.33333333333337" width="354.7037037037034" height="27.42666666666667" rx="2" fill="#8b5cf6"/>
+<text x="629.7" y="367.3" class="small" text-anchor="start">65.03</text>
+<text x="262.0" y="408.9" class="small" text-anchor="end">Core-set (synthetic)</text>
+<rect x="270" y="386.6666666666667" width="358.19259259259155" height="27.42666666666667" rx="2" fill="#8b5cf6"/>
+<text x="633.2" y="407.6" class="small" text-anchor="start">65.05</text>
+<text x="262.0" y="449.2" class="small" text-anchor="end">Core-set (MNLI)</text>
+<rect x="270" y="427.0" width="372.1481481481468" height="27.42666666666667" rx="2" fill="#2563eb"/>
+<text x="647.1" y="448.0" class="small" text-anchor="start">65.13</text>
+<text x="262.0" y="489.5" class="small" text-anchor="end">Random MNLI</text>
+<rect x="270" y="467.33333333333337" width="394.2444444444429" height="27.42666666666667" rx="2" fill="#2563eb"/>
+<text x="669.2" y="488.3" class="small" text-anchor="start">65.26</text>
+<text x="262.0" y="529.9" class="small" text-anchor="end">Failure-driven, no verification</text>
+<rect x="270" y="507.6666666666667" width="430.29629629629665" height="27.42666666666667" rx="2" fill="#f59e0b"/>
+<text x="705.3" y="528.6" class="small" text-anchor="start">65.47</text>
+<text x="262.0" y="570.2" class="small" text-anchor="end">BADGE (MNLI)</text>
+<rect x="270" y="548.0" width="471.0000000000005" height="27.42666666666667" rx="2" fill="#2563eb"/>
+<text x="746.0" y="569.0" class="small" text-anchor="start">65.70</text>
+<text x="262.0" y="610.5" class="small" text-anchor="end">Margin (MNLI)</text>
+<rect x="270" y="588.3333333333334" width="545.4296296296293" height="27.42666666666667" rx="2" fill="#2563eb"/>
+<text x="820.4" y="609.3" class="small" text-anchor="start">66.13</text>
+<text x="262.0" y="650.9" class="small" text-anchor="end">Uncertainty MNLI</text>
+<rect x="270" y="628.6666666666667" width="696.6148148148159" height="27.42666666666667" rx="2" fill="#2563eb"/>
+<text x="971.6" y="649.6" class="small" text-anchor="start">66.99</text>
+</svg>

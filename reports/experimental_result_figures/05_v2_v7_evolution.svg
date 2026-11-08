@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600" viewBox="0 0 1000 600">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:Inter,Arial,sans-serif;fill:#172033}.title{font-size:22px;font-weight:700}.axis{font-size:13px}.small{font-size:11px}.grid{stroke:#dbe3ed;stroke-width:1}.base{stroke:#475569;stroke-width:1.2}</style>
+<text x="500.0" y="32.0" class="title" text-anchor="middle">Historical V2–V7 evolution (seed 42)</text>
+<line x1="95" y1="505.0" x2="965" y2="505.0" class="grid"/>
+<text x="87.0" y="509.0" class="small" text-anchor="end">32.0</text>
+<line x1="95" y1="418.0" x2="965" y2="418.0" class="grid"/>
+<text x="87.0" y="422.0" class="small" text-anchor="end">39.0</text>
+<line x1="95" y1="331.0" x2="965" y2="331.0" class="grid"/>
+<text x="87.0" y="335.0" class="small" text-anchor="end">46.0</text>
+<line x1="95" y1="244.0" x2="965" y2="244.0" class="grid"/>
+<text x="87.0" y="248.0" class="small" text-anchor="end">53.0</text>
+<line x1="95" y1="157.0" x2="965" y2="157.0" class="grid"/>
+<text x="87.0" y="161.0" class="small" text-anchor="end">60.0</text>
+<line x1="95" y1="70.0" x2="965" y2="70.0" class="grid"/>
+<text x="87.0" y="74.0" class="small" text-anchor="end">67.0</text>
+<line x1="95" y1="70" x2="95" y2="505" class="base"/>
+<line x1="95" y1="505" x2="965" y2="505" class="base"/>
+<text x="95.0" y="527.0" class="small" text-anchor="middle">0</text>
+<text x="269.0" y="527.0" class="small" text-anchor="middle">1</text>
+<text x="443.0" y="527.0" class="small" text-anchor="middle">2</text>
+<text x="617.0" y="527.0" class="small" text-anchor="middle">3</text>
+<text x="791.0" y="527.0" class="small" text-anchor="middle">4</text>
+<text x="965.0" y="527.0" class="small" text-anchor="middle">5</text>
+<polyline points="95.0,102.6 269.0,103.1 443.0,97.9 617.0,97.1 791.0,98.3 965.0,94.9" fill="none" stroke="#2563eb" stroke-width="3" stroke-dasharray="none"/>
+<circle cx="95.0" cy="102.56285714285701" r="4" fill="#2563eb"/>
+<circle cx="269.0" cy="103.05999999999996" r="4" fill="#2563eb"/>
+<circle cx="443.0" cy="97.92285714285718" r="4" fill="#2563eb"/>
+<circle cx="617.0" cy="97.0942857142858" r="4" fill="#2563eb"/>
+<circle cx="791.0" cy="98.33714285714287" r="4" fill="#2563eb"/>
+<circle cx="965.0" cy="94.85714285714286" r="4" fill="#2563eb"/>
+<line x1="740" y1="80" x2="770" y2="80" stroke="#2563eb" stroke-width="3" stroke-dasharray="none"/>
+<text x="780.0" y="84.0" class="small" text-anchor="start">HANS overall</text>
+<polyline points="95.0,469.9 269.0,470.6 443.0,454.0 617.0,449.4 791.0,460.5 965.0,451.2" fill="none" stroke="#f59e0b" stroke-width="3" stroke-dasharray="none"/>
+<circle cx="95.0" cy="469.9470129176286" r="4" fill="#f59e0b"/>
+<circle cx="269.0" cy="470.61102100784217" r="4" fill="#f59e0b"/>
+<circle cx="443.0" cy="454.0108187525043" r="4" fill="#f59e0b"/>
+<circle cx="617.0" cy="449.3627621210098" r="4" fill="#f59e0b"/>
+<circle cx="791.0" cy="460.4848976320861" r="4" fill="#f59e0b"/>
+<circle cx="965.0" cy="451.18878436909694" r="4" fill="#f59e0b"/>
+<line x1="740" y1="102" x2="770" y2="102" stroke="#f59e0b" stroke-width="3" stroke-dasharray="none"/>
+<text x="780.0" y="106.0" class="small" text-anchor="start">Non-entailment</text>
+<text x="500.0" y="580.0" class="axis" text-anchor="middle">Protocol version index</text>
+<text x="22.0" y="300.0" class="axis" text-anchor="middle" transform="rotate(-90 22 300.0)">Accuracy (%)</text>
+</svg>

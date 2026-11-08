@@ -38,3 +38,11 @@ test_*
 !tests/test_v7_kl_hoeffding.py
 !reports/v7_minimal_cost_aware/KL_HOEFFDING_COMPARISON.md
 !report_111126_figures/*.svg
+
+# Paper-facing experimental audit and reproducible supporting assets.
+!experimental_result.md
+!reports/experimental_result_figures/
+!reports/experimental_result_figures/*.svg
+!reports/experimental_result_figures/*.png
+!reports/experimental_result_figures/*.csv
+!reports/experimental_result_figures/*.json

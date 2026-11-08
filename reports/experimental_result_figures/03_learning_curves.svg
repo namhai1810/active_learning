@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="600" viewBox="0 0 1000 600">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:Inter,Arial,sans-serif;fill:#172033}.title{font-size:22px;font-weight:700}.axis{font-size:13px}.small{font-size:11px}.grid{stroke:#dbe3ed;stroke-width:1}.base{stroke:#475569;stroke-width:1.2}</style>
+<text x="500.0" y="32.0" class="title" text-anchor="middle">Stopping-eval learning curves (not final test)</text>
+<text x="90.0" y="557.0" class="small" text-anchor="middle">0</text>
+<text x="198.8" y="557.0" class="small" text-anchor="middle">32</text>
+<text x="307.5" y="557.0" class="small" text-anchor="middle">64</text>
+<text x="416.2" y="557.0" class="small" text-anchor="middle">96</text>
+<text x="525.0" y="557.0" class="small" text-anchor="middle">128</text>
+<text x="633.8" y="557.0" class="small" text-anchor="middle">160</text>
+<text x="742.5" y="557.0" class="small" text-anchor="middle">192</text>
+<text x="851.2" y="557.0" class="small" text-anchor="middle">224</text>
+<text x="960.0" y="557.0" class="small" text-anchor="middle">256</text>
+<line x1="90" y1="520.0" x2="960" y2="520.0" class="grid"/>
+<text x="83.0" y="524.0" class="small" text-anchor="end">60%</text>
+<line x1="90" y1="414.1176470588235" x2="960" y2="414.1176470588235" class="grid"/>
+<text x="83.0" y="418.1" class="small" text-anchor="end">64%</text>
+<line x1="90" y1="308.2352941176471" x2="960" y2="308.2352941176471" class="grid"/>
+<text x="83.0" y="312.2" class="small" text-anchor="end">68%</text>
+<line x1="90" y1="202.35294117647058" x2="960" y2="202.35294117647058" class="grid"/>
+<text x="83.0" y="206.4" class="small" text-anchor="end">72%</text>
+<line x1="90" y1="96.47058823529412" x2="960" y2="96.47058823529412" class="grid"/>
+<text x="83.0" y="100.5" class="small" text-anchor="end">76%</text>
+<polyline points="90.0,434.7 198.8,397.5 307.5,382.7 416.2,278.8 525.0,240.6" fill="none" stroke="#059669" stroke-width="3" stroke-dasharray="none"/>
+<circle cx="90.0" cy="434.70588235294116" r="4" fill="#059669"/>
+<circle cx="198.75" cy="397.4509803921572" r="4" fill="#059669"/>
+<circle cx="307.5" cy="382.7450980392155" r="4" fill="#059669"/>
+<circle cx="416.25" cy="278.82352941176464" r="4" fill="#059669"/>
+<circle cx="525.0" cy="240.58823529411762" r="4" fill="#059669"/>
+<line x1="740" y1="82" x2="770" y2="82" stroke="#059669" stroke-width="3" stroke-dasharray="none"/>
+<text x="780.0" y="86.0" class="small" text-anchor="start">Verification ON</text>
+<polyline points="90.0,434.7 198.8,397.5 307.5,378.8 416.2,320.0 525.0,204.3" fill="none" stroke="#dc2626" stroke-width="3" stroke-dasharray="none"/>
+<circle cx="90.0" cy="434.70588235294116" r="4" fill="#dc2626"/>
+<circle cx="198.75" cy="397.4509803921572" r="4" fill="#dc2626"/>
+<circle cx="307.5" cy="378.8235294117648" r="4" fill="#dc2626"/>
+<circle cx="416.25" cy="320.00000000000034" r="4" fill="#dc2626"/>
+<circle cx="525.0" cy="204.3137254901965" r="4" fill="#dc2626"/>
+<line x1="740" y1="103" x2="770" y2="103" stroke="#dc2626" stroke-width="3" stroke-dasharray="none"/>
+<text x="780.0" y="107.0" class="small" text-anchor="start">Verification OFF</text>
+<polyline points="90.0,434.7 198.8,396.5 307.5,375.9 416.2,228.8 525.0,343.5 633.8,422.9 742.5,361.2 851.2,128.8 960.0,152.4" fill="none" stroke="#6366f1" stroke-width="3" stroke-dasharray="8 5"/>
+<circle cx="90.0" cy="434.70588235294116" r="4" fill="#6366f1"/>
+<circle cx="198.75" cy="396.4705882352944" r="4" fill="#6366f1"/>
+<circle cx="307.5" cy="375.8823529411765" r="4" fill="#6366f1"/>
+<circle cx="416.25" cy="228.82352941176472" r="4" fill="#6366f1"/>
+<circle cx="525.0" cy="343.5294117647061" r="4" fill="#6366f1"/>
+<circle cx="633.75" cy="422.9411764705881" r="4" fill="#6366f1"/>
+<circle cx="742.5" cy="361.1764705882353" r="4" fill="#6366f1"/>
+<circle cx="851.25" cy="128.82352941176487" r="4" fill="#6366f1"/>
+<circle cx="960.0" cy="152.35294117647067" r="4" fill="#6366f1"/>
+<line x1="740" y1="124" x2="770" y2="124" stroke="#6366f1" stroke-width="3" stroke-dasharray="8 5"/>
+<text x="780.0" y="128.0" class="small" text-anchor="start">Extended seed 42</text>
+<polyline points="90.0,434.7 198.8,393.5 307.5,384.7 416.2,281.8 525.0,149.4 633.8,181.8 742.5,375.9 851.2,122.9 960.0,122.9" fill="none" stroke="#a855f7" stroke-width="3" stroke-dasharray="8 5"/>
+<circle cx="90.0" cy="434.70588235294116" r="4" fill="#a855f7"/>
+<circle cx="198.75" cy="393.529411764706" r="4" fill="#a855f7"/>
+<circle cx="307.5" cy="384.7058823529411" r="4" fill="#a855f7"/>
+<circle cx="416.25" cy="281.7647058823529" r="4" fill="#a855f7"/>
+<circle cx="525.0" cy="149.41176470588238" r="4" fill="#a855f7"/>
+<circle cx="633.75" cy="181.7647058823531" r="4" fill="#a855f7"/>
+<circle cx="742.5" cy="375.8823529411765" r="4" fill="#a855f7"/>
+<circle cx="851.25" cy="122.94117647058823" r="4" fill="#a855f7"/>
+<circle cx="960.0" cy="122.94117647058823" r="4" fill="#a855f7"/>
+<line x1="740" y1="145" x2="770" y2="145" stroke="#a855f7" stroke-width="3" stroke-dasharray="8 5"/>
+<text x="780.0" y="149.0" class="small" text-anchor="start">Extended seed 43</text>
+<text x="500.0" y="588.0" class="axis" text-anchor="middle">Cumulative acquired examples</text>
+<text x="20.0" y="300.0" class="axis" text-anchor="middle" transform="rotate(-90 20 300.0)">Accuracy (%)</text>
+</svg>

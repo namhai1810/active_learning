@@ -1,0 +1,31 @@
+category,method,seed,budget,hans,nonent,mnli_m,source_path
+budget128_main,BADGE (MNLI),42,128,0.657,0.3878723120074796,0.5968415690269995,outputs/stage2_runs_literature/experiment_b/badge_mnli/budget_128/seed_42/result.json
+budget128_main,BADGE (synthetic),42,128,0.647,0.3579537865633765,0.5861436576668365,outputs/stage2_runs_literature/experiment_b/badge_synthetic/budget_128/seed_42/result.json
+budget128_main,CAL (MNLI),42,128,0.6475333333333333,0.36276212100975025,0.5905247070809985,outputs/stage2_runs_literature/experiment_b/cal_mnli/budget_128/seed_42/result.json
+budget128_main,CAL (synthetic),42,128,0.6503333333333333,0.36863897422198477,0.5910341314314824,outputs/stage2_runs_literature/experiment_b/cal_synthetic/budget_128/seed_42/result.json
+budget128_main,Core-set (MNLI),42,128,0.6513333333333333,0.37291304928542807,0.5939887926642894,outputs/stage2_runs_literature/experiment_b/coreset_mnli/budget_128/seed_42/result.json
+budget128_main,Core-set (synthetic),42,128,0.6505333333333333,0.36917323360491516,0.5901171676006113,outputs/stage2_runs_literature/experiment_b/coreset_synthetic/budget_128/seed_42/result.json
+budget128_main,"Failure-driven, no verification",42,128,0.6546666666666666,0.38373180178976896,0.5933774834437087,outputs/stage2_runs/experiment_a/failure_driven_no_verification/budget_128/seed_42/result.json
+budget128_main,Margin (MNLI),42,128,0.6612666666666667,0.3988246293575531,0.6013245033112583,outputs/stage2_runs_literature/experiment_b/margin_mnli/budget_128/seed_42/result.json
+budget128_main,Margin (synthetic),42,128,0.6470666666666667,0.3574195271804461,0.5856342333163526,outputs/stage2_runs_literature/experiment_b/margin_synthetic/budget_128/seed_42/result.json
+budget128_main,Random MNLI,42,128,0.6526,0.37651930012020834,0.5949057564951604,outputs/stage2_runs/experiment_a/random_mnli/budget_128/seed_42/result.json
+budget128_main,Random synthetic,42,128,0.6446,0.35167623881394416,0.583902190524707,outputs/stage2_runs/experiment_a/random_synthetic/budget_128/seed_42/result.json
+budget128_main,Uncertainty MNLI,42,128,0.6699333333333334,0.42299986643515425,0.6103922567498726,outputs/stage2_runs/experiment_a/uncertainty_mnli/budget_128/seed_42/result.json
+budget128_main,Zero-shot Qwen,42,0,0.6385333333333333,0.33751836516628825,0.5765664798777381,outputs/stage2_runs/experiment_a/zero_shot/budget_128/seed_42/result.json
+extended256,v7_extended,42,256,0.7508,0.6905302524375584,0.5974528782475802,outputs/stage2_runs_v7_minimal_cost_aware_m32_decision_cost_v2/seed_42/result.json
+extended256,v7_extended,43,256,0.7674,0.7511686924001603,0.612124299541518,outputs/stage2_runs_v7_minimal_cost_aware_m32_decision_cost_v2/seed_43/result.json
+historical_evolution,V2 CE,42,128,0.6438,0.3482035528248965,0.5825776872134488,outputs/stage2_runs_ours_verified_v2_ce/experiment_a/ours_verified/budget_128/seed_42/result.json
+historical_evolution,V2 pairwise,42,128,0.6434,0.34766929344196607,0.5824758023433521,outputs/stage2_runs_ours_verified_v2_pairwise/experiment_a/ours_verified/budget_128/seed_42/result.json
+historical_evolution,V3 CE,42,128,0.6475333333333333,0.3610257780152264,0.5876719307182884,outputs/stage2_runs_ours_verified_v3_ce/experiment_b/ours_verified/budget_128/seed_42/result.json
+historical_evolution,V5 CE,42,128,0.6482,0.3647655936957393,0.5880794701986755,outputs/stage2_runs_ours_verified_v5_ce/experiment_b/ours_verified/budget_128/seed_42/result.json
+historical_evolution,V7 consolidation,42,128,0.6472,0.3558167490316549,0.584411614875191,outputs/stage2_runs_ours_verified_v7_dual/experiment_b/ours_verified/budget_128/seed_42/branches/consolidation/result.json
+historical_evolution,V7 continuation,42,128,0.65,0.36329638039268064,0.58634742740703,outputs/stage2_runs_ours_verified_v7_dual/experiment_b/ours_verified/budget_128/seed_42/branches/continuation/result.json
+target_only,verified_target_only,42,128,0.6478666666666667,0.36516628823293706,0.5886907794192563,outputs/stage2_runs_ours_verified_target_only/experiment_a/ours_verified/budget_128/seed_42/result.json
+target_only,verified_target_only,43,128,0.6454666666666666,0.3567517029517831,0.5854304635761589,outputs/stage2_runs_ours_verified_target_only/experiment_a/ours_verified/budget_128/seed_43/result.json
+target_only,verified_target_only,44,128,0.6641333333333334,0.4068385201015093,0.6017320427916455,outputs/stage2_runs_ours_verified_target_only/experiment_a/ours_verified/budget_128/seed_44/result.json
+verification_ablation,verification_off,42,128,0.7050666666666666,0.5064778950180312,0.6157921548650025,outputs/stage2_runs_v7_training_verification_ablation/verification_off/seed_42/result.json
+verification_ablation,verification_on,42,128,0.6863333333333334,0.486710297849606,0.57809475292919,outputs/stage2_runs_v7_training_verification_ablation/verification_on/seed_42/result.json
+verification_ablation,verification_off,43,128,0.7331333333333333,0.6883932149058368,0.633622007131941,outputs/stage2_runs_v7_training_verification_ablation/verification_off/seed_43/result.json
+verification_ablation,verification_on,43,128,0.7440666666666667,0.647255242420195,0.6242485990830362,outputs/stage2_runs_v7_training_verification_ablation/verification_on/seed_43/result.json
+verification_ablation,verification_off,44,128,0.7253333333333334,0.5757980499532523,0.6200713194090678,outputs/stage2_runs_v7_training_verification_ablation/verification_off/seed_44/result.json
+verification_ablation,verification_on,44,128,0.7198666666666667,0.5664485107519701,0.5951095262353541,outputs/stage2_runs_v7_training_verification_ablation/verification_on/seed_44/result.json

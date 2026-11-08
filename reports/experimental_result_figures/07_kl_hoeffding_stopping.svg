@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:Inter,Arial,sans-serif;fill:#172033}.title{font-size:22px;font-weight:700}.axis{font-size:13px}.small{font-size:11px}.grid{stroke:#dbe3ed;stroke-width:1}.base{stroke:#475569;stroke-width:1.2}</style>
+<text x="600.0" y="31.0" class="title" text-anchor="middle">KL-Hoeffding: tighter radii, numerical diagnostics only</text>
+<rect x="70" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="87" y="154.21304884085598" width="16" height="230.78695115914402" fill="#2563eb"/>
+<text x="86.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 86 405)">42-R2</text>
+<rect x="680" y="244.0998077350752" width="28" height="55.90019226492482" fill="#059669"/>
+<rect x="118" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="135" y="208.49964065482743" width="16" height="176.50035934517257" fill="#2563eb"/>
+<text x="134.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 134 405)">42-R3</text>
+<rect x="723" y="300" width="28" height="27.508657459843615" fill="#dc2626"/>
+<rect x="166" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="183" y="182.9903656373914" width="16" height="202.0096343626086" fill="#2563eb"/>
+<text x="182.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 182 405)">42-R5</text>
+<rect x="766" y="295.3822714272592" width="28" height="4.617728572740829" fill="#059669"/>
+<rect x="214" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="231" y="183.37748503767915" width="16" height="201.62251496232085" fill="#2563eb"/>
+<text x="230.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 230 405)">42-R7</text>
+<rect x="809" y="251.2339235511554" width="28" height="48.766076448844586" fill="#059669"/>
+<rect x="262" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="279" y="240.43597552210406" width="16" height="144.56402447789594" fill="#2563eb"/>
+<text x="278.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 278 405)">42-R8</text>
+<rect x="852" y="300" width="28" height="7.632490552836926" fill="#dc2626"/>
+<rect x="310" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="327" y="158.83057535875963" width="16" height="226.16942464124037" fill="#2563eb"/>
+<text x="326.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 326 405)">43-R2</text>
+<rect x="895" y="248.18578944563575" width="28" height="51.81421055436424" fill="#059669"/>
+<rect x="358" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="375" y="147.412914173471" width="16" height="237.587085826529" fill="#2563eb"/>
+<text x="374.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 374 405)">43-R3</text>
+<rect x="938" y="298.90363531568624" width="28" height="1.0963646843137638" fill="#059669"/>
+<rect x="406" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="423" y="171.52593930178665" width="16" height="213.47406069821335" fill="#2563eb"/>
+<text x="422.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 422 405)">43-R4</text>
+<rect x="981" y="264.3762056404978" width="28" height="35.62379435950222" fill="#059669"/>
+<rect x="454" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="471" y="214.33516759726575" width="16" height="170.66483240273425" fill="#2563eb"/>
+<text x="470.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 470 405)">43-R5</text>
+<rect x="1024" y="300" width="28" height="12.326097542429752" fill="#dc2626"/>
+<rect x="502" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="519" y="253.55700561903078" width="16" height="131.44299438096922" fill="#2563eb"/>
+<text x="518.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 518 405)">43-R7</text>
+<rect x="1067" y="279.70296174267764" width="28" height="20.29703825732234" fill="#059669"/>
+<rect x="550" y="103.11467267088665" width="16" height="281.88532732911335" fill="#94a3b8"/>
+<rect x="567" y="178.9918012148156" width="16" height="206.0081987851844" fill="#2563eb"/>
+<text x="566.0" y="405.0" class="small" text-anchor="middle" transform="rotate(-55 566 405)">43-R8</text>
+<rect x="1110" y="277.7386951750981" width="28" height="22.261304824901938" fill="#059669"/>
+<text x="285.0" y="500.0" class="axis" text-anchor="middle">Confidence radius: Range (gray), KL (blue)</text>
+<text x="925.0" y="500.0" class="axis" text-anchor="middle">KL Net-UCB using projected cost</text>
+<line x1="650" y1="55" x2="650" y2="500" class="grid"/>
+<line x1="675" y1="300" x2="1170" y2="300" class="base"/>
+</svg>

@@ -1,0 +1,13 @@
+{
+  "completed_result_rows": 30,
+  "method_protocol_labels": 23,
+  "main_methods": 15,
+  "tables": 12,
+  "figures": 7,
+  "numerical_kl_stops": 3,
+  "certified_stops": 0,
+  "first_numerical_stop": {
+    "42": 3,
+    "43": 5
+  }
+}

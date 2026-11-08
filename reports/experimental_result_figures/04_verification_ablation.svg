@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="520" viewBox="0 0 820 520">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:Inter,Arial,sans-serif;fill:#172033}.title{font-size:22px;font-weight:700}.axis{font-size:13px}.small{font-size:11px}.grid{stroke:#dbe3ed;stroke-width:1}.base{stroke:#475569;stroke-width:1.2}</style>
+<text x="410.0" y="31.0" class="title" text-anchor="middle">Verification ablation by HANS prediction rule</text>
+<line x1="90" y1="440.0" x2="785" y2="440.0" class="grid"/>
+<text x="83.0" y="444.0" class="small" text-anchor="end">67</text>
+<line x1="90" y1="398.88888888888886" x2="785" y2="398.88888888888886" class="grid"/>
+<text x="83.0" y="402.9" class="small" text-anchor="end">68</text>
+<line x1="90" y1="357.77777777777777" x2="785" y2="357.77777777777777" class="grid"/>
+<text x="83.0" y="361.8" class="small" text-anchor="end">69</text>
+<line x1="90" y1="316.66666666666663" x2="785" y2="316.66666666666663" class="grid"/>
+<text x="83.0" y="320.7" class="small" text-anchor="end">70</text>
+<line x1="90" y1="275.55555555555554" x2="785" y2="275.55555555555554" class="grid"/>
+<text x="83.0" y="279.6" class="small" text-anchor="end">71</text>
+<line x1="90" y1="234.44444444444443" x2="785" y2="234.44444444444443" class="grid"/>
+<text x="83.0" y="238.4" class="small" text-anchor="end">72</text>
+<line x1="90" y1="193.33333333333331" x2="785" y2="193.33333333333331" class="grid"/>
+<text x="83.0" y="197.3" class="small" text-anchor="end">73</text>
+<line x1="90" y1="152.22222222222223" x2="785" y2="152.22222222222223" class="grid"/>
+<text x="83.0" y="156.2" class="small" text-anchor="end">74</text>
+<line x1="90" y1="111.11111111111111" x2="785" y2="111.11111111111111" class="grid"/>
+<text x="83.0" y="115.1" class="small" text-anchor="end">75</text>
+<line x1="90" y1="70.0" x2="785" y2="70.0" class="grid"/>
+<text x="83.0" y="74.0" class="small" text-anchor="end">76</text>
+<text x="263.8" y="478.0" class="axis" text-anchor="middle">Three-way→binary</text>
+<rect x="149.725" y="247.78271604938305" width="96" height="192.21728395061695" fill="#059669"/>
+<text x="197.7" y="241.8" class="small" text-anchor="middle">ON 71.68</text>
+<rect x="281.775" y="229.6024691358026" width="96" height="210.3975308641974" fill="#dc2626"/>
+<text x="329.8" y="223.6" class="small" text-anchor="middle">OFF 72.12</text>
+<text x="611.2" y="478.0" class="axis" text-anchor="middle">Direct binary</text>
+<rect x="497.225" y="174.14814814814807" width="96" height="265.85185185185196" fill="#059669"/>
+<text x="545.2" y="168.1" class="small" text-anchor="middle">ON 73.47</text>
+<rect x="629.275" y="201.3728395061729" width="96" height="238.6271604938271" fill="#dc2626"/>
+<text x="677.3" y="195.4" class="small" text-anchor="middle">OFF 72.80</text>
+</svg>
