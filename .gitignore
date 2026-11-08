@@ -32,3 +32,6 @@ test_*
 !tests/test_v7_final_mathematical_feasibility.py
 !docs/v7_final_mathematical_feasibility.md
 !reports/v7_minimal_cost_aware/FINAL_MATHEMATICAL_FEASIBILITY.md
+!tests/test_v7_time_adaptive_stopping.py
+!docs/v7_time_adaptive_stopping.md
+!reports/v7_minimal_cost_aware/TIME_ADAPTIVE_STOPPING.md
