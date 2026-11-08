@@ -1,0 +1,15 @@
+extends: stage2_v7_minimal_cost_aware.yaml
+
+# Protocol v2.1 changes only the confidence radius used for complete, fixed-
+# shard pilot sets.  The V7 flow, m/delta/K/T, lambda, and marginal decision
+# cost remain inherited and unchanged.  A distinct config prevents an
+# interrupted legacy-v2 run from silently resuming under a different bound.
+cost_aware:
+  protocol_version: v7_m32_range_aware_marginal_continue_cost_v2_1
+  gain_confidence_method: fixed_baseline_range_aware
+  required_pilots: 32
+  M: 1.0
+  delta: 0.05
+  K: 1
+  T: 7
+  lambda_cost: 0.2

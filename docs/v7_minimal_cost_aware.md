@@ -23,10 +23,12 @@ Rounds 2-8
   -> Refresh
 ```
 
-`unresolved` is retained exactly as in V7. It is never converted to `refuted`.
-If any hypothesis remains unresolved, the Cost-Aware gate returns CONTINUE with
-reason `unresolved_hypotheses_require_more_evidence`; it does not run pilots or
-claim a gain-cost STOP.
+`unresolved` is retained exactly as in V7. It is never converted to `refuted`
+and continues through adaptive verification and acquisition. Its presence does
+not suppress a policy-level pilot estimate when the unchanged selector has at
+least one certified hypothesis and a valid mixed batch. This does not turn an
+unresolved hypothesis into certified evidence and does not support a claim of
+the Appendix hypothesis-specific theorem.
 
 Legacy `configs/stage2_v7_early_stopping_verification_on.yaml` contains no
 `cost_aware` section and follows the original fixed 4x32 path. Regression tests
@@ -57,9 +59,10 @@ known a priori to satisfy `Delta <= M=1`. Therefore the minimum of the
 Hoeffding upper bound and `M` remains a valid upper confidence bound. Both raw
 and support-bounded UCBs are logged.
 
-Four temporary pilot clones start from the same current LoRA checkpoint and
-AdamW state, train on the exact selected batch with the same early-stopping
-policy, and evaluate on four disjoint predeclared 64-example shards. Their
+Thirty-two temporary pilot clones start from the same current LoRA checkpoint
+and AdamW state, train on the exact selected batch with the same early-stopping
+policy and distinct predeclared training-randomization seeds, and evaluate on
+one predeclared fixed 64-example shard for that round. Their
 updates are never committed. The main update uses the original V7 seed and is
 performed only after CONTINUE.
 
@@ -74,9 +77,11 @@ Round 1 is always CONTINUE and has no Cost-Aware decision. From round 2:
 
 1. no active hypotheses: unchanged V7 operational STOP;
 2. insufficient synthetic data: unchanged V7 operational STOP;
-3. any unresolved hypothesis: CONTINUE for more evidence, no pilots;
-4. fewer than four valid pilots: CONTINUE due insufficient pilot evidence;
-5. otherwise compute the mixed-policy UCB and:
+3. no certified support for the unchanged mixed policy: CONTINUE due
+   insufficient evidence; unresolved hypotheses remain active;
+4. fewer than 32 valid pilots: CONTINUE due insufficient pilot evidence;
+5. otherwise compute the mixed-policy UCB even when unresolved hypotheses are
+   also present, and:
    - CONTINUE when `U_t(pi) > 0`;
    - STOP with `nonpositive_mixed_policy_optimistic_net_gain` when
      `U_t(pi) <= 0`;
@@ -89,11 +94,18 @@ These reasons remain distinct in `stop_reason_category`.
 - Adaptive verification retains V7's two-look `[20, 30]` schedule.
 - `verification.max_rounds=9` covers refreshes before rounds 2-8, the final
   audit, and the reserved family used by the inherited accounting.
-- Mixed-policy gain uses `K=1`, `T=7`, `delta=.05`, `M=1`, and `m=4`.
-- The 2,850 old gain-report IDs are prediction-blind partitioned before model
-  outcomes: `7 * 4 * 64 = 1,792` pilot-eval IDs and 1,058 held-out report IDs.
-- Pilot shards are pairwise disjoint and disjoint from the 900 early-stopping
-  examples.
+- Mixed-policy gain uses `K=1`, `T=7`, `delta=.05`, `M=1`, and `m=32`.
+- A fully disjoint `32 * 7 * 64` design would require 14,336 gain-eval IDs and
+  is impossible with the frozen 2,850-ID pool. The protocol therefore
+  prediction-blind partitions `7 * 64 = 448` pilot-eval IDs (one fixed shard
+  per round) and leaves 2,402 held-out report IDs.
+- Round shards are mutually disjoint and disjoint from the 900 early-stopping
+  examples, sealed HANS/MNLI and held-out gain report. The 64 shared eval rows
+  within a round are not counted as 32 independent observations.
+- The Hoeffding units are the 32 pilot gains over distinct training
+  randomizations, conditional on the fixed empirical-risk shard. Their
+  conditional independence/unbiasedness is a stated assumption, not a proven
+  property.
 - Sealed HANS and MNLI are materialized only after the adaptive loop freezes.
 
 ## Cost model and ex-ante scale calibration
@@ -114,10 +126,19 @@ two calibration fields. This is a scientific preference/utility assumption,
 not an empirically estimated parameter. Changing it would define a different
 protocol and requires a new preregistered experiment rather than tuning a run.
 
-The cost ledger includes:
+Protocol `v7_m32_marginal_continue_cost_v2` separates:
 
-- incurred teacher, generation/QC, selector-evaluation, and pilot resources;
-- projected main training and validation resources known before the decision.
+- `incurred_exploration_cost`: teacher, generation/QC, selector evaluation and
+  completed pilot resources. These are sunk at decision time and do not enter
+  `U`;
+- `decision_cost`: projected main LoRA training and validation resources that
+  occur only if the current intervention CONTINUEs;
+- `total_pipeline_cost`: actual incurred exploration plus the decision cost
+  only when the main update is committed.
+
+The decision is therefore
+`U = min(M, Delta_hat + b) - lambda * decision_cost`. The previous m=32 result
+that used total round cost remains historical and is not overwritten.
 
 Pilot wall-clock proxies are partitioned into disjoint training and evaluation
 components. Evaluation accounting includes the pre/post gain measurements and
@@ -133,25 +154,32 @@ claims.
 With the frozen values,
 
 ```text
-b = M * sqrt(2 log(2 K T / delta) / m) = 1.6785096966.
+b = M * sqrt(2 log(2 K T / delta) / m) = 0.5934427944.
 ```
 
-The raw radius remains wider than the feasible gain interval. Intersecting the
-gain UCB with `M=1` makes its largest possible value exactly 1, so the maximum
+The raw radius remains substantial relative to the feasible gain interval.
+Intersecting the gain UCB with `M=1` makes its largest possible value exactly 1, so the maximum
 break-even cost under `lambda=.2` is USD 5. A lower observed gain UCB has a
 proportionally lower break-even cost. This makes gain-cost STOP operationally
 possible without weakening the confidence statement, but does not guarantee
-that any seed stops before round 8. Unresolved hypotheses and insufficient
-pilot evidence still force CONTINUE rather than a fabricated gain-cost STOP.
+that any seed stops before round 8. Insufficient pilot evidence still forces
+CONTINUE rather than a fabricated gain-cost STOP. Unresolved hypotheses remain
+represented in V7 but do not automatically suppress a complete mixed-policy
+estimate.
 
 The conditional independence and unbiasedness of pilot gains remain
-unverified: pilot shards and training seeds are disjoint, but the runs share a
-checkpoint and selected batch. The UCB arithmetic is implemented exactly; the
-statistical assumption is not claimed as empirically proven.
+unverified: training seeds differ, but pilots share a checkpoint, selected
+batch and fixed evaluation shard. The UCB arithmetic is implemented exactly;
+the statistical assumption is not claimed as empirically proven.
 
 ## Artifacts
 
-Each seed writes under `outputs/stage2_runs_v7_minimal_cost_aware/seed_N/`:
+Protocol-v2 runs write under
+`outputs/stage2_runs_v7_minimal_cost_aware_m32_decision_cost_v2/seed_N/`.
+The original eight-round seed-42 trajectory under
+`outputs/stage2_runs_v7_minimal_cost_aware/seed_42/` and the completed m=32
+pilot cache under `outputs/stage2_runs_v7_minimal_cost_aware_m32/seed_42/`
+are read-only replay inputs:
 
 - `cost_aware/pilot_eval_plan.json`;
 - `cost_aware/round_NNN/pilots/*/observation.json`;
@@ -190,21 +218,36 @@ Check GPUs:
 nvidia-smi
 ```
 
-Run one seed:
+Audit the protocol and immutable seed-42 replay source without loading a model:
 
 ```bash
-TEACHER_GPU=1 STUDENT_GPU=2 \
-bash run_v7_minimal_cost_aware.sh --seed 42
+python scripts/audit_v7_minimal_cost_aware.py
+bash run_v7_minimal_cost_aware_replay.sh --audit-only
 ```
 
-Resume:
+Replay only the seed-42 round-2 decision from the 32 saved pilots (CPU-only):
 
 ```bash
-TEACHER_GPU=1 STUDENT_GPU=2 \
-bash run_v7_minimal_cost_aware.sh --seed 42 --resume
+bash run_v7_minimal_cost_aware_replay.sh --decision-only
 ```
 
-After inspecting seed 42, repeat with `--seed 43` and `--seed 44`. Generate an
+Then continue seed 42 from the compatible historical trajectory; new pilots
+are run only for later decisions that have no compatible cache:
+
+```bash
+STUDENT_GPU=2 bash run_v7_minimal_cost_aware_replay.sh --resume
+```
+
+The replay validates source config, selected IDs and checkpoint/AdamW hashes;
+it runs no teacher stages or main V7 training and stops reusing later rounds if
+the new decision stops earlier. For fresh seeds, use
+
+```bash
+TEACHER_GPU=1 STUDENT_GPU=2 bash run_v7_minimal_cost_aware.sh --seed 43
+TEACHER_GPU=1 STUDENT_GPU=2 bash run_v7_minimal_cost_aware.sh --seed 44
+```
+
+Add `--resume` to either fresh-seed command after an interruption. Generate an
 artifact-only report with:
 
 ```bash

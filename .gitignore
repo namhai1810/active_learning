@@ -15,7 +15,15 @@ test_*
 !tests/test_verification_probes.py
 !tests/test_hypothesis_discovery_retry.py
 !tests/test_v7_minimal_cost_aware.py
+!tests/test_v7_correct_stopping_benchmark.py
 !reports/*
 *.svg
+!report_281026_figures/*.svg
+!reports/stage2_seed42_overview/figures_28102026/*.svg
+!reports/stage2_v7_training_verification_ablation/figures/*.svg
 *.csv
 *.png
+
+*.svg
+*.md
+*.sh

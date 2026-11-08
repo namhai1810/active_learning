@@ -30,6 +30,8 @@ class V7MinimalCostAwareConfig:
     start_round: int
     required_pilots: int
     pilot_eval_size: int
+    shared_eval_shard_within_round: bool
+    gain_confidence_method: str
     M: float
     delta: float
     K: int
@@ -51,6 +53,12 @@ class V7MinimalCostAwareConfig:
             start_round=int(raw.get("start_round", 2)),
             required_pilots=int(raw.get("required_pilots", 4)),
             pilot_eval_size=int(raw.get("pilot_eval_size", 64)),
+            shared_eval_shard_within_round=bool(
+                raw.get("shared_eval_shard_within_round", False)
+            ),
+            gain_confidence_method=str(
+                raw.get("gain_confidence_method", "legacy_symmetric_support")
+            ),
             M=float(raw.get("M", 1.0)),
             delta=float(raw.get("delta", 0.05)),
             K=int(raw.get("K", 1)),
@@ -173,6 +181,7 @@ def predeclare_pilot_eval_plan(
     pilots_per_round: int,
     eval_size: int,
     seed: int,
+    shared_eval_shard_within_round: bool = False,
 ) -> dict[str, Any]:
     """Partition pilot-eval IDs before model outcomes are observed."""
     ids = [str(item) for item in report_ids]
@@ -183,7 +192,16 @@ def predeclare_pilot_eval_plan(
         raise ValueError("Decision rounds must be unique integers after round 1")
     if pilots_per_round <= 0 or eval_size <= 0:
         raise ValueError("Pilot count and eval size must be positive")
-    required = len(rounds) * pilots_per_round * eval_size
+        if config.gain_confidence_method not in {
+            "legacy_symmetric_support",
+            "fixed_baseline_range_aware",
+        }:
+            raise ValueError(
+                "gain_confidence_method must be legacy_symmetric_support or "
+                "fixed_baseline_range_aware"
+            )
+    shards_per_round = 1 if shared_eval_shard_within_round else pilots_per_round
+    required = len(rounds) * shards_per_round * eval_size
     if required >= len(ids):
         raise ValueError(
             "Pilot-eval plan must leave a non-empty held-out gain-report set"
@@ -198,7 +216,7 @@ def predeclare_pilot_eval_plan(
     shards: dict[str, list[list[str]]] = {}
     for round_index in rounds:
         current: list[list[str]] = []
-        for _ in range(pilots_per_round):
+        for _ in range(shards_per_round):
             current.append(ordered[cursor : cursor + eval_size])
             cursor += eval_size
         shards[str(round_index)] = current
@@ -211,6 +229,16 @@ def predeclare_pilot_eval_plan(
         "decision_rounds": rounds,
         "pilots_per_round": pilots_per_round,
         "eval_size": eval_size,
+        "shared_eval_shard_within_round": shared_eval_shard_within_round,
+        "independence_unit": (
+            "independent_pilot_training_randomization_conditional_on_shared_"
+            "fixed_eval_shard"
+            if shared_eval_shard_within_round
+            else "disjoint_pilot_eval_shards_and_training_randomization"
+        ),
+        "shared_eval_examples_are_not_counted_as_independent_observations": (
+            shared_eval_shard_within_round
+        ),
         "source_ids": ids,
         "pilot_ids": pilot_ids,
         "held_out_gain_report_ids": held_out,
@@ -241,9 +269,11 @@ def decide_mixed_policy_round(
 ) -> MixedPolicyDecision:
     """Apply an evidence gate before the mixed-policy gain-cost rule.
 
-    Unresolved hypotheses and incomplete pilots force CONTINUE rather than a
-    gain-cost STOP.  Operational absence of active hypotheses/data is handled
-    by the unchanged V7 loop before this controller is called.
+    Unresolved hypotheses remain visible in the decision record but do not
+    block a policy-level pilot estimate when at least one certified hypothesis
+    exists. Incomplete pilots still force CONTINUE rather than a gain-cost
+    STOP. Operational absence of active hypotheses/data is handled by the
+    unchanged V7 loop before this controller is called.
     """
     if required_pilots <= 0:
         raise ValueError("required_pilots must be positive")
@@ -272,20 +302,6 @@ def decide_mixed_policy_round(
         "unresolved_hypotheses": unresolved,
         "refuted_hypotheses": refuted,
     }
-    if unresolved:
-        return MixedPolicyDecision(
-            action="continue",
-            reason="unresolved_hypotheses_require_more_evidence",
-            delta_hat=estimate.delta_hat,
-            confidence_radius=estimate.radius,
-            estimated_net_value=None,
-            raw_gain_ucb=None,
-            bounded_gain_ucb=None,
-            raw_optimistic_net_value=None,
-            optimistic_net_value=None,
-            gain_cost_stop_evaluated=False,
-            **common,
-        )
     if not certified:
         return MixedPolicyDecision(
             action="continue",

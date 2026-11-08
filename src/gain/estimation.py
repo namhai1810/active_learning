@@ -46,7 +46,15 @@ def empirical_mean_gain(gains: Sequence[float]) -> float:
     return sum(gains) / len(gains)
 
 
-def gain_confidence_radius(m: int, M: float, K: int, T: int, delta: float) -> float:
+def gain_confidence_radius(
+    m: int,
+    M: float,
+    K: int,
+    T: int,
+    delta: float,
+    *,
+    support_width: float | None = None,
+) -> float:
     """Return the predeclared K-by-T union-adjusted Hoeffding radius.
 
     Under adaptive rounds this is valid only when the observations used at each
@@ -61,7 +69,12 @@ def gain_confidence_radius(m: int, M: float, K: int, T: int, delta: float) -> fl
     if not 0.0 < delta < 1.0:
         raise ValueError("delta must be strictly between 0 and 1")
     _validate_bound(M)
-    return M * math.sqrt(2.0 * math.log(2.0 * K * T / delta) / m)
+    width = 2.0 * M if support_width is None else float(support_width)
+    if not math.isfinite(width) or width <= 0.0:
+        raise ValueError("support_width must be finite and positive")
+    if width > 2.0 * M + 1e-12:
+        raise ValueError("support_width cannot exceed the configured [-M, M] width")
+    return width * math.sqrt(math.log(2.0 * K * T / delta) / (2.0 * m))
 
 
 def estimate_gain(
@@ -73,6 +86,7 @@ def estimate_gain(
     K: int,
     T: int,
     tolerance: float = 1e-12,
+    support_width: float | None = None,
 ) -> GainEstimate:
     """Estimate mean gain; return an explicit invalid state for zero pilots."""
     if not hypothesis_id:
@@ -99,7 +113,14 @@ def estimate_gain(
 
     checked = [validate_gain(value, M, tolerance) for value in gains]
     mean = empirical_mean_gain(checked)
-    radius = gain_confidence_radius(len(checked), M, K, T, delta)
+    radius = gain_confidence_radius(
+        len(checked),
+        M,
+        K,
+        T,
+        delta,
+        support_width=support_width,
+    )
     return GainEstimate(
         hypothesis_id=hypothesis_id,
         m=len(checked),

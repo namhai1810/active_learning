@@ -45,8 +45,8 @@ if [[ "$TEACHER_GPU" == "$STUDENT_GPU" ]]; then
 fi
 
 CONFIG="configs/stage2_v7_minimal_cost_aware.yaml"
-OUTPUT="outputs/stage2_runs_v7_minimal_cost_aware/seed_$SEED"
-LOG_DIR="logs/stage2_v7_minimal_cost_aware/seed_$SEED"
+OUTPUT="outputs/stage2_runs_v7_minimal_cost_aware_m32_decision_cost_v2/seed_$SEED"
+LOG_DIR="logs/stage2_v7_minimal_cost_aware_m32_decision_cost_v2/seed_$SEED"
 
 COMPLETION_MARKER="outputs/stage2_acquisition_ours_verified_v5/seed_42/.complete"
 if [[ ! -f "$COMPLETION_MARKER" ]]; then

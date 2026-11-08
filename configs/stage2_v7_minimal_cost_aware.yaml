@@ -15,13 +15,17 @@ verification:
 
 cost_aware:
   enabled: true
+  protocol_version: v7_m32_marginal_continue_cost_v2
+  decision_cost_semantics: marginal_incremental_cost_if_continue_after_pilots
   decision_scope: exact_v7_mixed_soft_pair_round_action
   start_round: 2
 
-  # Historical pilot defaults from configs/main_pilot_gain.yaml. They are
-  # predeclared here; no HANS/MNLI final result is used to tune them.
-  required_pilots: 4
+  # Thirty-two independent pilot training randomizations use one fixed,
+  # predeclared 64-example shard per round. Shared evaluation examples are not
+  # counted as independent observations; the pilot run is the Hoeffding unit.
+  required_pilots: 32
   pilot_eval_size: 64
+  shared_eval_shard_within_round: true
   pilot_seed: 42
   preserve_pilot_adapters: false
 

@@ -41,7 +41,8 @@ HISTORICAL_SEED42 = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--input-root", default="outputs/stage2_runs_v7_minimal_cost_aware"
+        "--input-root",
+        default="outputs/stage2_runs_v7_minimal_cost_aware_m32_decision_cost_v2",
     )
     parser.add_argument(
         "--output", default="reports/v7_minimal_cost_aware/REPORT.md"
@@ -208,6 +209,9 @@ def _seed42_analysis(
         for item in result.get("cost_aware_rounds", [])
         if int(item.get("round", 0)) >= 2
     ]
+    stop_decision = result.get("cost_aware_stop_record")
+    if isinstance(stop_decision, dict):
+        decisions.append(stop_decision)
     total_pilots = sum(
         int((item.get("gain_estimate") or {}).get("m", 0))
         for item in decisions
@@ -217,10 +221,10 @@ def _seed42_analysis(
         for item in decisions
     )
     unresolved_rounds = sum(
-        item.get("decision", {}).get("reason")
-        == "unresolved_hypotheses_require_more_evidence"
+        bool(item.get("decision", {}).get("unresolved_hypotheses"))
         for item in decisions
     )
+    stopped_by_gain_cost = result.get("stop_reason_category") == "gain_cost"
     lines.extend(
         [
             "",
@@ -232,11 +236,15 @@ def _seed42_analysis(
             f"- Terminal category: `{result['stop_reason_category']}`; reason: "
             f"`{result['stop_reason']}`.",
             "",
-            "Consequently, seed 42 does **not** empirically validate a gain-cost "
-            "STOP. Every decision round was gated by unresolved evidence, so the "
-            "observed performance should be interpreted as an eight-round, "
-            "maximum-budget V7 trajectory under the safe evidence gate—not as an "
-            "accuracy gain caused by the stopping controller.",
+            (
+                "The run reached a genuine gain-cost STOP after complete pilot "
+                "evidence. This establishes execution of the declared controller, "
+                "not the unclaimed hypothesis-specific Appendix theorem."
+                if stopped_by_gain_cost
+                else "The run did not reach a gain-cost STOP. Its terminal result "
+                "must be interpreted using the recorded operational/max-budget "
+                "reason; unresolved hypotheses did not suppress complete mixed-policy pilots."
+            ),
             "",
             "### Final prediction-rule diagnostic",
             "",
@@ -253,6 +261,13 @@ def _seed42_analysis(
     total_tokens = float(teacher.get("input_tokens", 0.0)) + float(
         teacher.get("output_tokens", 0.0)
     )
+    historical_resources = result.get(
+        "reused_source_resource_usage_full_8_round_historical", {}
+    )
+    historical_teacher = historical_resources.get("teacher", {})
+    historical_tokens = float(historical_teacher.get("input_tokens", 0.0)) + float(
+        historical_teacher.get("output_tokens", 0.0)
+    )
     lines.extend(
         [
             "",
@@ -260,6 +275,15 @@ def _seed42_analysis(
             "",
             f"- Teacher calls/tokens: {int(float(teacher.get('calls', 0))):,} / "
             f"{int(total_tokens):,}.",
+            *(
+                [
+                    "- Reused immutable source teacher calls/tokens (historical "
+                    f"compute, not rerun): {int(float(historical_teacher.get('calls', 0))):,} / "
+                    f"{int(historical_tokens):,}."
+                ]
+                if historical_resources
+                else []
+            ),
             f"- Teacher wall time: {float(teacher.get('teacher_wall_clock_seconds', 0.0))/3600:.2f} hours.",
             f"- Refresh wall time: {float(resources.get('refresh_wall_seconds', 0.0))/3600:.2f} hours.",
             f"- Training / validation GPU-wall proxies: "
@@ -270,6 +294,10 @@ def _seed42_analysis(
             f"- Modeled decision cost for rounds 2+: "
             f"{float(result['total_modeled_decision_cost_rounds_2_plus']):.6f} "
             "configured USD units. Round 1 and the shared initial pool are excluded.",
+            f"- Incurred exploration cost for rounds 2+: "
+            f"{float(result['total_incurred_exploration_cost_rounds_2_plus']):.6f}.",
+            f"- Total actual pipeline cost for rounds 2+: "
+            f"{float(result['total_pipeline_cost_rounds_2_plus']):.6f}.",
         ]
     )
     return lines
@@ -289,8 +317,8 @@ def build_report(
         "",
         "## Final results",
         "",
-        "| Seed | Rounds | Examples | Stop category | Stop reason | HANS Three-way | HANS Direct Binary | MNLI m/mm | Modeled decision cost (r2+) | Teacher tokens |",
-        "|---:|---:|---:|---|---|---:|---:|---:|---:|---:|",
+        "| Seed | Rounds | Examples | Stop category | Stop reason | HANS Three-way | HANS Direct Binary | MNLI m/mm | Decision cost (r2+) | Incurred exploration | Total pipeline | Teacher tokens |",
+        "|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in sorted(rows, key=lambda item: int(item["seed"])):
         teacher = result.get("resource_usage", {}).get("teacher", {})
@@ -307,6 +335,8 @@ def build_report(
             f"{100*float(result['mnli']['matched']['accuracy']):.4f}% / "
             f"{100*float(result['mnli']['mismatched']['accuracy']):.4f}% | "
             f"{float(result['total_modeled_decision_cost_rounds_2_plus']):.6f} | "
+            f"{float(result['total_incurred_exploration_cost_rounds_2_plus']):.6f} | "
+            f"{float(result['total_pipeline_cost_rounds_2_plus']):.6f} | "
             f"{tokens:.0f} |"
         )
     lines.extend(
@@ -321,6 +351,8 @@ def build_report(
             f"- Acquired examples: {_mean_std([float(r['actual_training_examples']) for r in rows])}",
             f"- Completed rounds: {_mean_std([float(r['rounds']) for r in rows])}",
             f"- Modeled decision cost (rounds 2+): {_mean_std([float(r['total_modeled_decision_cost_rounds_2_plus']) for r in rows])}",
+            f"- Incurred exploration cost (rounds 2+): {_mean_std([float(r['total_incurred_exploration_cost_rounds_2_plus']) for r in rows])}",
+            f"- Total actual pipeline cost (rounds 2+): {_mean_std([float(r['total_pipeline_cost_rounds_2_plus']) for r in rows])}",
             "",
         ]
     )
@@ -366,11 +398,12 @@ def build_report(
             "",
             "## Interpretation limits",
             "",
-            "- Unresolved hypotheses force CONTINUE; they are never treated as refuted.",
-            "- Pilot gain uses predeclared, disjoint gain-eval shards and never sealed HANS/MNLI.",
-            "- Conditional independence/unbiasedness of related LoRA pilots is not empirically proven.",
-            "- With m=4, K=1, T=7, δ=.05 and M=1, the raw radius is about 1.6785. The gain UCB is intersected with the known support bound M; the radius itself is not reduced.",
+            "- Unresolved hypotheses remain active for V7 verification/acquisition; they neither become refuted nor block a complete mixed-policy pilot estimate when certified support exists.",
+            "- Pilot gain uses one predeclared 64-example fixed shard per round, disjoint across rounds, the 900 stopping subset, held-out gain report, and sealed tests.",
+            "- The 32 Hoeffding observations are pilot-training randomizations conditional on that fixed empirical shard. Shared eval examples are not counted as independent observations; conditional independence/unbiasedness remains an explicit unverified assumption.",
+            "- With m=32, K=1, T=7, δ=.05 and M=1, the raw radius is about 0.5934. The gain UCB is intersected with the known support bound M; the radius itself is not reduced.",
             "- Lambda is fixed ex ante at 0.2 gain/USD from the declared indifference point 1.0 gain = USD 5; no final-test outcome is used.",
+            "- Protocol v2 excludes already-incurred teacher/verification/generation/pilot cost from U. Decision cost is only the marginal main-update cost if CONTINUE; incurred and total actual cost remain separately reported.",
             "- Round-1 and the frozen initial-pool sunk cost are outside the round-2+ decision-cost aggregate.",
             "",
         ]

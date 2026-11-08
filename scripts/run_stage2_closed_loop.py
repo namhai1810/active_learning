@@ -3,6 +3,15 @@
 
 from __future__ import annotations
 
+import sys as _bootstrap_sys
+from pathlib import Path as _BootstrapPath
+
+_BOOTSTRAP_ROOT = _BootstrapPath(__file__).resolve().parents[1]
+if str(_BOOTSTRAP_ROOT) not in _bootstrap_sys.path:
+    _bootstrap_sys.path.insert(0, str(_BOOTSTRAP_ROOT))
+
+from src.gain.range_aware import estimate_fixed_shard_range_aware_gain
+
 import argparse
 import copy
 import gc
@@ -36,7 +45,12 @@ from src.data.mnli import load_mnli
 from src.evaluation.hans import evaluate_hans
 from src.evaluation.metrics import compute_hans_metrics
 from src.evaluation.mnli import evaluate_mnli
-from src.decision.cost_model import CostUsage, compute_cost, cost_rates_from_config
+from src.decision.cost_model import (
+    CostRates,
+    CostUsage,
+    compute_cost,
+    cost_rates_from_config,
+)
 from src.decision.v7_minimal_cost_aware import (
     MIXED_POLICY_ID,
     V7MinimalCostAwareConfig,
@@ -430,7 +444,13 @@ def _mixed_policy_round_cost(
     early_stopping: EarlyStoppingConfig,
     cost_config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Account incurred exploration plus the predeclared main-update projection."""
+    """Separate sunk exploration from the marginal cost of CONTINUE.
+
+    The controller observes pilots before it decides. Teacher, verification,
+    generation, selection evaluation and pilot compute are therefore incurred
+    (sunk) at decision time. Only the projected main LoRA update and its
+    validation are incremental consequences of CONTINUE and enter U.
+    """
     rates, currency = cost_rates_from_config(cost_config)
     projections = cost_config.get("projections", {})
     if not isinstance(projections, dict):
@@ -501,19 +521,69 @@ def _mixed_policy_round_cost(
     )
     incurred = compute_cost(incurred_usage, rates, currency=currency)
     projected = compute_cost(projected_usage, rates, currency=currency)
-    total = compute_cost(
+    projected_total = compute_cost(
         incurred_usage.plus(projected_usage), rates, currency=currency
     )
-    payload = total.to_dict()
+    payload = {
+        "currency": currency,
+        "incurred_exploration_cost": incurred.total,
+        "decision_cost": projected.total,
+        "projected_total_pipeline_cost_if_continue": projected_total.total,
+        "total_pipeline_cost": None,
+        "components": projected_total.to_dict()["components"],
+        "usage": projected_total.to_dict()["usage"],
+        "rates": projected_total.to_dict()["rates"],
+    }
     payload["phases"] = {
         "incurred_exploration": incurred.to_dict(),
         "projected_main_update": projected.to_dict(),
     }
-    payload["decision_cost_is_total_round_cost"] = True
+    payload["decision_cost_semantics"] = (
+        "marginal_incremental_cost_if_continue_after_pilots"
+    )
+    payload["incurred_cost_is_excluded_from_gain_ucb_decision"] = True
+    payload["total_pipeline_cost_semantics"] = (
+        "actual_cost_after_decision; populated once action is known"
+    )
     payload["rates_are_predeclared_assumptions"] = True
     payload["gpu_seconds_are_wall_clock_proxies"] = True
     payload["pilot_training_and_evaluation_gpu_time_are_disjoint"] = True
     return payload
+
+
+def _finalize_mixed_policy_round_cost(
+    payload: dict[str, Any], *, action: str,
+    actual_main_update_usage: CostUsage | None = None,
+) -> dict[str, Any]:
+    """Freeze actual pipeline cost after STOP/CONTINUE is known."""
+    if action not in {"stop", "continue"}:
+        raise ValueError(f"Unsupported Cost-Aware action: {action}")
+    finalized = copy.deepcopy(payload)
+    incurred = float(finalized["incurred_exploration_cost"])
+    decision = float(finalized["decision_cost"])
+    finalized["decision_action"] = action
+    if action == "stop":
+        if actual_main_update_usage is not None:
+            raise ValueError("STOP cannot have actual main-update usage")
+        finalized["total_pipeline_cost"] = incurred
+        finalized["main_update_cost_status"] = "not_committed"
+        finalized["projected_main_update_committed"] = False
+    elif actual_main_update_usage is None:
+        finalized["total_pipeline_cost"] = None
+        finalized["main_update_cost_status"] = "pending_after_continue"
+        finalized["projected_main_update_committed"] = False
+    else:
+        actual = compute_cost(
+            actual_main_update_usage,
+            CostRates.from_mapping(finalized["rates"]),
+            currency=str(finalized["currency"]),
+        )
+        finalized["phases"]["actual_main_update"] = actual.to_dict()
+        finalized["actual_main_update_cost"] = actual.total
+        finalized["total_pipeline_cost"] = incurred + actual.total
+        finalized["main_update_cost_status"] = "measured_and_committed"
+        finalized["projected_main_update_committed"] = True
+    return finalized
 
 
 def _bypassed_verification_states(
@@ -1266,6 +1336,9 @@ def main() -> None:
             pilots_per_round=cost_aware_config.required_pilots,
             eval_size=cost_aware_config.pilot_eval_size,
             seed=cost_aware_config.pilot_seed,
+            shared_eval_shard_within_round=(
+                cost_aware_config.shared_eval_shard_within_round
+            ),
         )
         plan_path = output / "cost_aware" / "pilot_eval_plan.json"
         if args.resume:
@@ -1275,13 +1348,18 @@ def main() -> None:
                 )
         else:
             write_json(plan_path, pilot_eval_plan)
-        pilot_eval_shards = {
-            int(round_key): [
+        for round_key, shards in pilot_eval_plan["round_shards"].items():
+            materialized = [
                 _hans([shared_index[item] for item in shard])
                 for shard in shards
             ]
-            for round_key, shards in pilot_eval_plan["round_shards"].items()
-        }
+            if cost_aware_config.shared_eval_shard_within_round:
+                if len(materialized) != 1:
+                    raise ValueError(
+                        "Shared pilot-eval plan must contain one shard per round"
+                    )
+                materialized = materialized * cost_aware_config.required_pilots
+            pilot_eval_shards[int(round_key)] = materialized
         report_ids = list(pilot_eval_plan["held_out_gain_report_ids"])
 
     model = require_mapping(config, "model")
@@ -1304,6 +1382,8 @@ def main() -> None:
     cost_aware_decisions: list[dict[str, Any]] = []
     cost_aware_stop_record: dict[str, Any] | None = None
     cumulative_modeled_decision_cost = 0.0
+    cumulative_incurred_exploration_cost = 0.0
+    cumulative_total_pipeline_cost = 0.0
     stop_reason = "maximum_budget_reached"
     start_round = 1
 
@@ -1386,10 +1466,34 @@ def main() -> None:
                 if isinstance(item.get("cost_aware"), dict)
             ]
             cumulative_modeled_decision_cost = sum(
-                float(item["decision_cost"].get("total", 0.0))
+                float(item["decision_cost"].get("decision_cost", 0.0))
                 for item in cost_aware_decisions
                 if isinstance(item.get("decision_cost"), dict)
             )
+            cumulative_incurred_exploration_cost = sum(
+                float(item["decision_cost"].get("incurred_exploration_cost", 0.0))
+                for item in cost_aware_decisions
+                if isinstance(item.get("decision_cost"), dict)
+            )
+            cumulative_total_pipeline_cost = sum(
+                float(item["decision_cost"].get("total_pipeline_cost", 0.0))
+                for item in cost_aware_decisions
+                if isinstance(item.get("decision_cost"), dict)
+            )
+            for item in cost_aware_decisions:
+                round_index = int(item["round"])
+                if round_index <= 1 or not isinstance(
+                    item.get("decision_cost"), dict
+                ):
+                    continue
+                decision_root = (
+                    output / "cost_aware" / f"round_{round_index:03d}"
+                )
+                # The completed round log is the atomic commit boundary. If a
+                # process stopped between that write and the detailed ledger
+                # write, restore the latter from the committed round record.
+                write_json(decision_root / "cost.json", item["decision_cost"])
+                write_json(decision_root / "decision.json", item)
         # Replay only completed refresh metadata to restore the hypothesis and
         # pool state. No teacher/model work is repeated here.
         for replay_round in range(2, len(round_records) + 1):
@@ -1425,6 +1529,12 @@ def main() -> None:
             start_round = max_rounds + 1
             cumulative_modeled_decision_cost = float(
                 cost_aware_stop_record["cumulative_modeled_decision_cost"]
+            )
+            cumulative_incurred_exploration_cost = float(
+                cost_aware_stop_record["cumulative_incurred_exploration_cost"]
+            )
+            cumulative_total_pipeline_cost = float(
+                cost_aware_stop_record["cumulative_total_pipeline_cost"]
             )
             print("[RESUME] Reusing frozen Cost-Aware STOP decision")
 
@@ -1541,13 +1651,13 @@ def main() -> None:
         if minimal_cost_aware_v7 and round_index >= cost_aware_config.start_round:
             decision_root = output / "cost_aware" / f"round_{round_index:03d}"
             decision_root.mkdir(parents=True, exist_ok=True)
-            unresolved_ids = sorted(
+            certified_ids = sorted(
                 key
                 for key, value in states.items()
-                if value.get("state") == "unresolved"
+                if value.get("state") == "certified"
             )
             observations: list[dict[str, Any]] = []
-            if not unresolved_ids:
+            if certified_ids:
                 # Pilot clones cannot coexist with the acquisition model on the
                 # target GPU. Reloading afterward preserves the same adapter,
                 # optimizer input, selected IDs, and actual training seed.
@@ -1575,14 +1685,26 @@ def main() -> None:
                 cost_aware_pilot_seconds = sum(
                     float(item["wall_clock_seconds"]) for item in observations
                 )
-            estimate = estimate_gain(
-                MIXED_POLICY_ID,
-                [float(item["gain"]) for item in observations],
-                M=cost_aware_config.M,
-                delta=cost_aware_config.delta,
-                K=cost_aware_config.K,
-                T=cost_aware_config.T,
-            )
+            range_aware_audit: dict[str, Any] | None = None
+            if cost_aware_config.gain_confidence_method == "fixed_baseline_range_aware":
+                estimate, range_aware_audit = estimate_fixed_shard_range_aware_gain(
+                    observations,
+                    hypothesis_id=MIXED_POLICY_ID,
+                    required_pilots=cost_aware_config.required_pilots,
+                    M=cost_aware_config.M,
+                    delta=cost_aware_config.delta,
+                    K=cost_aware_config.K,
+                    T=cost_aware_config.T,
+                )
+            else:
+                estimate = estimate_gain(
+                    MIXED_POLICY_ID,
+                    [float(item["gain"]) for item in observations],
+                    M=cost_aware_config.M,
+                    delta=cost_aware_config.delta,
+                    K=cost_aware_config.K,
+                    T=cost_aware_config.T,
+                )
             refresh_dir = output / "refresh" / f"round_{round_index:03d}"
             decision_cost = _mixed_policy_round_cost(
                 refresh_dir=refresh_dir,
@@ -1598,8 +1720,11 @@ def main() -> None:
                 states=states,
                 estimate=estimate,
                 required_pilots=cost_aware_config.required_pilots,
-                cost=float(decision_cost["total"]),
+                cost=float(decision_cost["decision_cost"]),
                 lambda_cost=cost_aware_config.lambda_cost,
+            )
+            decision_cost = _finalize_mixed_policy_round_cost(
+                decision_cost, action=decision.action
             )
             cost_aware_round = {
                 "round": round_index,
@@ -1613,14 +1738,34 @@ def main() -> None:
                     )
                 ),
                 "gain_estimate": estimate.to_dict(),
+                **(
+                    {"range_aware_audit": range_aware_audit}
+                    if range_aware_audit is not None
+                    else {}
+                ),
                 "decision_cost": decision_cost,
                 "decision": decision.to_dict(),
                 "pilot_observations": observations,
                 "pilot_wall_seconds": cost_aware_pilot_seconds,
                 "theory_scope": (
-                    "policy_level_hoeffding_ucb_for_exact_v7_mixed_action; "
-                    "appendix_hypothesis_specific_theorem_not_claimed"
+                    (
+                        "policy_level_fixed_shard_range_aware_hoeffding_ucb_for_"
+                        "exact_v7_mixed_action; "
+                        "appendix_hypothesis_specific_theorem_not_claimed; "
+                        "shared_eval_shard_conditions_on_fixed_empirical_risk; "
+                        "population_level_guarantee_not_claimed"
+                    )
+                    if cost_aware_config.gain_confidence_method
+                    == "fixed_baseline_range_aware"
+                    else (
+                        "policy_level_hoeffding_ucb_for_exact_v7_mixed_action; "
+                        "appendix_hypothesis_specific_theorem_not_claimed; "
+                        "shared_eval_shard_conditions_on_fixed_empirical_risk"
+                    )
                 ),
+                "pilot_independence_unit": pilot_eval_plan[
+                    "independence_unit"
+                ],
                 "sealed_final_test_used": False,
                 "mnli_used": False,
             }
@@ -1636,7 +1781,16 @@ def main() -> None:
                     )
                 if not path.is_file():
                     write_json(path, payload)
-            cumulative_modeled_decision_cost += float(decision_cost["total"])
+            cumulative_modeled_decision_cost += float(
+                decision_cost["decision_cost"]
+            )
+            cumulative_incurred_exploration_cost += float(
+                decision_cost["incurred_exploration_cost"]
+            )
+            if decision_cost["total_pipeline_cost"] is not None:
+                cumulative_total_pipeline_cost += float(
+                    decision_cost["total_pipeline_cost"]
+                )
             if decision.action == "stop":
                 if "student" in locals():
                     del student
@@ -1646,6 +1800,12 @@ def main() -> None:
                     **cost_aware_round,
                     "cumulative_modeled_decision_cost": (
                         cumulative_modeled_decision_cost
+                    ),
+                    "cumulative_incurred_exploration_cost": (
+                        cumulative_incurred_exploration_cost
+                    ),
+                    "cumulative_total_pipeline_cost": (
+                        cumulative_total_pipeline_cost
                     ),
                     "checkpoint_unchanged": True,
                 }
@@ -1778,6 +1938,36 @@ def main() -> None:
         )
         stopping_seconds = time.perf_counter() - stopping_started
         elapsed = training_seconds + stopping_seconds
+        if (
+            minimal_cost_aware_v7
+            and round_index > 1
+            and cost_aware_round is not None
+        ):
+            assert stateful_result is not None
+            actual_main_usage = CostUsage(
+                lora_training_runs=1,
+                lora_training_gpu_seconds=max(
+                    0.0,
+                    training_seconds - stateful_result.validation_seconds,
+                ),
+                evaluation_runs=stateful_result.epochs_completed + 1,
+                evaluation_items=(
+                    (stateful_result.epochs_completed + 1)
+                    * len(stopping_examples)
+                ),
+                evaluation_gpu_seconds=(
+                    stateful_result.validation_seconds + stopping_seconds
+                ),
+            )
+            finalized_cost = _finalize_mixed_policy_round_cost(
+                cost_aware_round["decision_cost"],
+                action="continue",
+                actual_main_update_usage=actual_main_usage,
+            )
+            cost_aware_round["decision_cost"] = finalized_cost
+            cumulative_total_pipeline_cost += float(
+                finalized_cost["total_pipeline_cost"]
+            )
         del student
         _clear_cuda_cache()
         write_jsonl(round_dir / "stopping_predictions.jsonl", stopping_predictions)
@@ -1893,6 +2083,12 @@ def main() -> None:
             )
         write_jsonl(output / "rounds.jsonl", round_records)
         write_jsonl(output / "selected_training_examples.jsonl", selected_rows)
+        if minimal_cost_aware_v7 and round_index > 1 and cost_aware_round is not None:
+            decision_root = (
+                output / "cost_aware" / f"round_{round_index:03d}"
+            )
+            write_json(decision_root / "cost.json", cost_aware_round["decision_cost"])
+            write_json(decision_root / "decision.json", cost_aware_round)
 
     if early_stop_v7 and not minimal_cost_aware_v7 and (
         len(round_records) != max_rounds or len(selected_ids) != total_budget
@@ -2127,6 +2323,15 @@ def main() -> None:
                     ],
                     "total_modeled_decision_cost_rounds_2_plus": (
                         cumulative_modeled_decision_cost
+                    ),
+                    "total_incurred_exploration_cost_rounds_2_plus": (
+                        cumulative_incurred_exploration_cost
+                    ),
+                    "total_pipeline_cost_rounds_2_plus": (
+                        cumulative_total_pipeline_cost
+                    ),
+                    "cost_aware_protocol_version": (
+                        "v7_m32_marginal_continue_cost_v2"
                     ),
                     "cost_aware_theory_scope": {
                         "action": MIXED_POLICY_ID,

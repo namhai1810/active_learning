@@ -38,6 +38,9 @@ def audit_protocol() -> dict[str, Any]:
         pilots_per_round=policy.required_pilots,
         eval_size=policy.pilot_eval_size,
         seed=policy.pilot_seed,
+        shared_eval_shard_within_round=(
+            policy.shared_eval_shard_within_round
+        ),
     )
     radius = gain_confidence_radius(
         policy.required_pilots,
@@ -77,6 +80,15 @@ def audit_protocol() -> dict[str, Any]:
         ),
         "decision_horizon_matches_rounds_2_to_8": policy.T == 7,
         "pilot_plan_disjoint": bool(plan["pairwise_disjoint"]),
+        "pilot_plan_uses_one_fixed_shard_per_round": (
+            plan["shared_eval_shard_within_round"]
+            and all(len(value) == 1 for value in plan["round_shards"].values())
+        ),
+        "shared_eval_examples_not_counted_as_pilot_observations": (
+            plan[
+                "shared_eval_examples_are_not_counted_as_independent_observations"
+            ]
+        ),
         "held_out_gain_report_nonempty": bool(plan["held_out_gain_report_ids"]),
         "mixed_policy_does_not_claim_appendix_theorem": (
             current["cost_aware"]["decision_scope"]
@@ -91,6 +103,12 @@ def audit_protocol() -> dict[str, Any]:
             and policy.calibration_currency
             == current["cost_aware"]["cost"]["currency"]
         ),
+        "marginal_decision_cost_protocol_v2": (
+            current["cost_aware"].get("protocol_version")
+            == "v7_m32_marginal_continue_cost_v2"
+            and current["cost_aware"].get("decision_cost_semantics")
+            == "marginal_incremental_cost_if_continue_after_pilots"
+        ),
     }
     return {
         "status": "ready" if all(checks.values()) else "failed",
@@ -100,7 +118,9 @@ def audit_protocol() -> dict[str, Any]:
         "round_1_cost_decision": False,
         "decision_rounds": list(range(2, 9)),
         "gain_ucb": {
-            "formula": "min(M, delta_hat + b) - lambda_cost * C",
+            "formula": (
+                "min(M, delta_hat + b) - lambda_cost * decision_cost"
+            ),
             "M": policy.M,
             "m": policy.required_pilots,
             "K": policy.K,
@@ -117,13 +137,32 @@ def audit_protocol() -> dict[str, Any]:
             "support_intersection_preserves_coverage": True,
         },
         "expected_stopping_behavior": (
-            "STOP is feasible when lambda*C reaches the bounded gain UCB. "
+            "STOP is feasible when lambda*marginal_continue_cost reaches the "
+            "bounded gain UCB. Incurred exploration is reported but excluded. "
             "It is not forced and no seed/final-test outcome calibrates lambda."
         ),
+        "cost_accounting": {
+            "decision_cost": "projected incremental main update if CONTINUE",
+            "incurred_exploration_cost": (
+                "teacher+verification+generation+selection+completed pilots"
+            ),
+            "total_pipeline_cost": (
+                "incurred + decision cost only when main update is committed"
+            ),
+            "incurred_cost_enters_U": False,
+        },
         "pilot_eval": {
             "source": 2850,
             "used": len(plan["pilot_ids"]),
             "held_out": len(plan["held_out_gain_report_ids"]),
+            "pilots_per_round": policy.required_pilots,
+            "fixed_eval_examples_per_round": policy.pilot_eval_size,
+            "independence_unit": plan["independence_unit"],
+            "limitation": (
+                "Hoeffding observations are training-randomization pilot gains "
+                "conditional on one fixed empirical-risk shard per round; "
+                "conditional independence/unbiasedness is assumed, not proven"
+            ),
         },
         "theory_claim": (
             "policy-level Hoeffding UCB only; appendix hypothesis-specific "
