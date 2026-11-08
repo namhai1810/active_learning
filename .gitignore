@@ -27,3 +27,8 @@ test_*
 *.svg
 *.md
 *.sh
+
+# V7 final mathematical-feasibility deliverables.
+!tests/test_v7_final_mathematical_feasibility.py
+!docs/v7_final_mathematical_feasibility.md
+!reports/v7_minimal_cost_aware/FINAL_MATHEMATICAL_FEASIBILITY.md
