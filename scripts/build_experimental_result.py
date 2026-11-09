@@ -35,6 +35,14 @@ def load_json(relative: str) -> dict[str, Any]:
     return payload
 
 
+def load_csv(relative: str) -> list[dict[str, str]]:
+    path = ROOT / relative
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
 def mean_std(values: Iterable[float]) -> tuple[float, float]:
     values = list(values)
     return statistics.fmean(values), statistics.stdev(values) if len(values) > 1 else math.nan
@@ -164,6 +172,11 @@ def result_metrics(path: str) -> dict[str, Any]:
 
 def on_off_data() -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    resource_rows = load_csv("reports/stage2_v7_training_verification_ablation/per_round_performance_cost.csv")
+    resource_index = {
+        (item["verification"].upper(), int(item["seed"]), int(item["round"])): item
+        for item in resource_rows
+    }
     for mode in ("on", "off"):
         for seed in (42, 43, 44):
             result_path = f"outputs/stage2_runs_v7_training_verification_ablation/verification_{mode}/seed_{seed}/result.json"
@@ -171,6 +184,8 @@ def on_off_data() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             result = load_json(result_path)
             diagnostic = load_json(diagnostic_path)
             direct = diagnostic["rounds"]["4"]["metrics"]["direct_binary"]
+            round3 = diagnostic["rounds"]["3"]["metrics"]
+            round4 = diagnostic["rounds"]["4"]["metrics"]
             resource = result["resource_usage"]
             teacher = resource["teacher"]
             gpu_proxy = sum(float(resource.get(key, 0.0)) for key in (
@@ -190,6 +205,13 @@ def on_off_data() -> tuple[list[dict[str, Any]], dict[str, Any]]:
                 "mnli_mm": result["mnli"]["mismatched"]["accuracy"],
                 "tokens": float(teacher["input_tokens"]) + float(teacher["output_tokens"]),
                 "calls": float(teacher["calls"]), "gpu_proxy": gpu_proxy,
+                "round3_three": round3["three_way_to_binary"]["overall_accuracy"],
+                "round3_direct": round3["direct_binary"]["overall_accuracy"],
+                "round4_three": round4["three_way_to_binary"]["overall_accuracy"],
+                "round4_direct": round4["direct_binary"]["overall_accuracy"],
+                "round3_tokens": float(resource_index[(mode.upper(), seed, 3)]["teacher_tokens_cumulative"]),
+                "round4_tokens": float(resource_index[(mode.upper(), seed, 4)]["teacher_tokens_cumulative"]),
+                "round4_incremental_tokens": float(resource_index[(mode.upper(), seed, 4)]["teacher_tokens_incremental"]),
                 **state_counts,
                 "learning_curve": result["learning_curve"],
                 "heuristics": result["hans_final"]["accuracy_by_heuristic"],
@@ -400,21 +422,39 @@ def create_figures(main: list[dict[str, Any]], onoff: list[dict[str, Any]], exte
     # Figure 5: evolution.
     line_chart("05_v2_v7_evolution","Historical V2–V7 evolution (seed 42)",list(range(len(evolution))),[("HANS overall",[100*r["hans"] for r in evolution],"#2563eb",""),("Non-entailment",[100*r["nonent"] for r in evolution],"#f59e0b","")],"Protocol version index","Accuracy (%)",32,67)
 
-    # Figure 6: two-panel resources.
+    # Figure 6: performance-token Pareto audit plus pilot compute.  Full-HANS
+    # points are retrospective and must not be used to select a checkpoint.
     adaptive=load_json("outputs/stage2_diagnostics/v7_adaptive_pilot_allocation_v4/simulation.json")["summaries"]
-    width,height=1000,520; body=[text(width/2,31,"Resource diagnostics","title","middle")]
-    # Tokens.
-    for idx,(mode,color) in enumerate((("ON","#059669"),("OFF","#dc2626"))):
-        value=statistics.fmean(r["tokens"] for r in onoff if r["mode"]==mode)/1000; x=130+idx*160; h=value/1100*330
-        body += [f'<rect x="{x}" y="{420-h}" width="95" height="{h}" fill="{color}"/>',text(x+47,440,mode,"axis","middle"),text(x+47,410-h,f"{value:.0f}k","small","middle")]
-    body.append(text(220,480,"Mean teacher tokens","axis","middle"))
+    width,height=1200,600; body=[text(width/2,31,"Performance–resource diagnostics","title","middle")]
+    # Full-HANS versus cumulative acquisition teacher tokens for R3/R4.
+    lx0,lx1,ly0,ly1=90,670,75,500; xmin,xmax,ymin,ymax=100,850,64,77
+    sx=lambda value: lx0+(value-xmin)/(xmax-xmin)*(lx1-lx0)
+    sy=lambda value: ly0+(ymax-value)/(ymax-ymin)*(ly1-ly0)
+    for tick in (100,250,400,550,700,850):
+        x=sx(tick); body += [f'<line x1="{x}" y1="{ly0}" x2="{x}" y2="{ly1}" class="grid"/>',text(x,ly1+20,f"{tick}k","small","middle")]
+    for tick in (64,68,72,76):
+        y=sy(tick); body += [f'<line x1="{lx0}" y1="{y}" x2="{lx1}" y2="{y}" class="grid"/>',text(lx0-7,y+4,f"{tick}%","small","end")]
+    for row in onoff:
+        color="#059669" if row["mode"]=="ON" else "#dc2626"
+        x3,y3=sx(row["round3_tokens"]/1000),sy(100*row["round3_three"])
+        x4,y4=sx(row["round4_tokens"]/1000),sy(100*row["round4_three"])
+        highlighted = row["mode"] == "ON" and row["seed"] == 42
+        stroke_width = 4 if highlighted else 2
+        opacity = 1.0 if highlighted else 0.65
+        body += [f'<line x1="{x3}" y1="{y3}" x2="{x4}" y2="{y4}" stroke="{color}" stroke-width="{stroke_width}" opacity="{opacity}"/>',f'<circle cx="{x3}" cy="{y3}" r="{8 if highlighted else 6}" fill="white" stroke="{color}" stroke-width="{4 if highlighted else 3}"/>',f'<circle cx="{x4}" cy="{y4}" r="{8 if highlighted else 6}" fill="{color}"/>',text(x3+7,y3-7,f"{row['mode']}{row['seed']} R3","small"),text(x4+7,y4-7,"R4","small")]
+    body += [
+        '<rect x="105" y="86" width="315" height="42" rx="7" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>',
+        text(118,104,"ON42 R3 vs R4: -283k acquisition tokens", "small"),
+        text(118,121,"and +2.62 pp HANS (Three-way; retrospective)", "small"),
+    ]
+    body += [text((lx0+lx1)/2,548,"Cumulative acquisition teacher tokens","axis","middle"),text(22,(ly0+ly1)/2,"Full-HANS Three-way accuracy (%)","axis","middle",-90),text((lx0+lx1)/2,58,"R3 (open) → R4 (filled); retrospective only","axis","middle")]
     # Pilot hours.
     for si,seed in enumerate((42,43)):
         for oi,(strategy,color) in enumerate((("fixed_32","#64748b"),("adaptive","#8b5cf6"))):
-            value=next(r["pilot_gpu_hours_used"] for r in adaptive if r["seed"]==seed and r["strategy"]==strategy); x=580+si*180+oi*60; h=value/14*330
-            body += [f'<rect x="{x}" y="{420-h}" width="48" height="{h}" fill="{color}"/>',text(x+24,410-h,f"{value:.1f}h","small","middle")]
-        body.append(text(640+si*180,440,f"Seed {seed}","axis","middle"))
-    body += [text(725,480,"Pilot GPU wall-hours: fixed (gray) vs adaptive (purple)","axis","middle"),f'<line x1="500" y1="65" x2="500" y2="475" class="grid"/>']
+            value=next(r["pilot_gpu_hours_used"] for r in adaptive if r["seed"]==seed and r["strategy"]==strategy); x=790+si*180+oi*60; h=value/14*360
+            body += [f'<rect x="{x}" y="{480-h}" width="48" height="{h}" fill="{color}"/>',text(x+24,470-h,f"{value:.1f}h","small","middle")]
+        body.append(text(850+si*180,505,f"Seed {seed}","axis","middle"))
+    body += [text(940,548,"Pilot GPU wall-hours: fixed (gray) vs adaptive (purple)","axis","middle"),f'<line x1="720" y1="60" x2="720" y2="550" class="grid"/>']
     save_svg("06_resource_cost_breakdown",width,height,body)
 
     # Figure 7: KL comparison and projected net values.
@@ -467,6 +507,14 @@ def build() -> tuple[str, dict[str, Any]]:
     objective = load_json("reports/stage2_ours_verified_v2_ablation/seed_42_budget_128/objective_ablation.json")
     objective_rows = [[item["metric"], pct(item["ce"]), pct(item["pairwise"]), f"{100*item['pairwise_minus_ce']:+.04f} pp"] for item in objective["metrics"]]
     ver_rows = [[r["mode"], r["seed"], pct(r["three"]), pct(r["direct"]), pct(r["three_nonent"]), pct(r["mnli_m"]), f"{r['tokens']:.0f}", f"{r['calls']:.0f}"] for r in onoff]
+    resource_checkpoint_rows = [[
+        r["mode"], r["seed"], pct(r["round3_three"]), pct(r["round4_three"]),
+        f"{100*(r['round4_three']-r['round3_three']):+.2f}",
+        f"{r['round3_tokens']/1000:.1f}k", f"{r['round4_tokens']/1000:.1f}k",
+        f"+{r['round4_incremental_tokens']/1000:.1f}k",
+        f"{100*(r['round4_direct']-r['round3_direct']):+.2f}",
+        "R3 dominates under current rule" if r["round3_three"] > r["round4_three"] else "R4 improves",
+    ] for r in onoff]
     state_rows = [[r["seed"], r["certified"], r["unresolved"], r["refuted"]] for r in onoff if r["mode"] == "ON"]
     heuristic_rows = []
     zero = next(r for r in main if r["name"] == "Zero-shot Qwen")["payload"]["hans_final"]["accuracy_by_heuristic"]
@@ -611,11 +659,17 @@ The label breakdown reveals the central trade-off: zero-shot is entailment-heavy
 
 **Research question.** What resource overhead is measured, and does any confidence method establish an online STOP?
 
-Verification ON uses `{pm((r['tokens'] for r in onoff if r['mode']=='ON'), scale=1.0, digits=0)}` teacher tokens versus `{pm((r['tokens'] for r in onoff if r['mode']=='OFF'), scale=1.0, digits=0)}` for OFF. These are run-specific teacher token totals; shared initial-pool costs are excluded. GPU wall-clock fields are proxies, not hardware-utilization integrals, and the seed-42 OFF run was affected by contention, so timing comparisons are descriptive rather than controlled cost measurements.
+Verification ON uses `{pm((r['tokens'] for r in onoff if r['mode']=='ON'), scale=1.0, digits=0)}` total recorded teacher tokens versus `{pm((r['tokens'] for r in onoff if r['mode']=='OFF'), scale=1.0, digits=0)}` for OFF. Those final totals include the run's post-training audit, whereas the checkpoint-efficiency analysis below uses cumulative acquisition teacher tokens through each round. Shared initial-pool costs are excluded in both views.
+
+{md_table(['Mode','Seed','R3 HANS','R4 HANS','R4−R3 (pp)','R3 tokens','R4 tokens','Extra R4 tokens','Direct Δ (pp)','Pareto reading'], resource_checkpoint_rows)}
+
+The most favorable verified efficiency case is ON seed 42: R3 reaches `71.2533%` full-HANS Three-way with `544,918` cumulative acquisition tokens; R4 consumes another `283,452` tokens yet falls to `68.6333%`. Thus R3 Pareto-dominates R4 for this seed under the current evaluator and also avoids one 32-example update. This is the clearest empirical motivation for the paper's stopping component: additional verified acquisition is not guaranteed to improve robustness and can move the model to a worse performance–cost point. The result is not universal: R4 improves Three-way accuracy for the other five seed/mode pairs, and under Direct Binary the same ON seed-42 R4 improves by `+0.60 pp`. Because full-HANS is sealed reporting data, this Pareto finding is retrospective evidence for designing a future validation-based stop rule—not authorization to select R3 post hoc.
+
+GPU wall-clock fields are proxies, not hardware-utilization integrals, and the seed-42 OFF run was affected by contention, so timing comparisons are descriptive rather than controlled cost measurements. The `+283,452` figure is the observed round-4 acquisition-token increment; it is not a full counterfactual pipeline saving because a run stopped at R3 could still require a final audit/evaluation.
 
 ![Resource and pilot compute](reports/experimental_result_figures/06_resource_cost_breakdown.svg)
 
-*Figure 6: Left, mean teacher tokens for ON/OFF. Right, measured cached-pilot wall-hours consumed by Fixed-32 versus the retrospective adaptive simulation.*
+*Figure 6: Left, retrospective full-HANS Three-way performance versus cumulative acquisition teacher tokens for R3 (open) and R4 (filled); ON seed 42 moves down and right. Right, measured cached-pilot wall-hours consumed by Fixed-32 versus adaptive simulation. Neither panel supplies an online stopping certificate.*
 
 Adaptive allocation uses 20 versus 160 pilots for seed 42 and 24 versus 192 for seed 43, saving 7.40 and 11.19 measured GPU wall-hours relative to Fixed-32. Every adaptive outcome is `uncertified_continue`; these are retrospective compute savings, not evidence of safe stopping.
 
@@ -723,7 +777,7 @@ Generated by `scripts/build_experimental_result.py`. Supporting audit tables are
         writer.writeheader(); writer.writerows(audit_rows)
     summary = {
         "completed_result_rows": len(audit_rows), "method_protocol_labels": 23, "main_methods": len(main),
-        "tables": 12, "figures": 7, "numerical_kl_stops": len(numerical_rows),
+        "tables": 13, "figures": 7, "numerical_kl_stops": len(numerical_rows),
         "certified_stops": 0, "first_numerical_stop": first_numerical,
     }
     (FIG_DIR / "audit_summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

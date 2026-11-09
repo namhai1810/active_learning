@@ -176,11 +176,24 @@ The label breakdown reveals the central trade-off: zero-shot is entailment-heavy
 
 **Research question.** What resource overhead is measured, and does any confidence method establish an online STOP?
 
-Verification ON uses `1016856 ± 18290` teacher tokens versus `214243 ± 905` for OFF. These are run-specific teacher token totals; shared initial-pool costs are excluded. GPU wall-clock fields are proxies, not hardware-utilization integrals, and the seed-42 OFF run was affected by contention, so timing comparisons are descriptive rather than controlled cost measurements.
+Verification ON uses `1016856 ± 18290` total recorded teacher tokens versus `214243 ± 905` for OFF. Those final totals include the run's post-training audit, whereas the checkpoint-efficiency analysis below uses cumulative acquisition teacher tokens through each round. Shared initial-pool costs are excluded in both views.
+
+| Mode | Seed | R3 HANS | R4 HANS | R4−R3 (pp) | R3 tokens | R4 tokens | Extra R4 tokens | Direct Δ (pp) | Pareto reading |
+|---|---|---|---|---|---|---|---|---|---|
+| ON | 42 | 71.25 | 68.63 | -2.62 | 544.9k | 828.4k | +283.5k | +0.60 | R3 dominates under current rule |
+| ON | 43 | 69.27 | 74.41 | +5.13 | 547.8k | 822.3k | +274.5k | +5.59 | R4 improves |
+| ON | 44 | 68.53 | 71.99 | +3.45 | 541.0k | 808.1k | +267.2k | +5.13 | R4 improves |
+| OFF | 42 | 64.69 | 70.51 | +5.82 | 144.2k | 214.6k | +70.4k | +6.47 | R4 improves |
+| OFF | 43 | 69.50 | 73.31 | +3.81 | 141.2k | 213.2k | +72.1k | +4.51 | R4 improves |
+| OFF | 44 | 69.13 | 72.53 | +3.41 | 142.5k | 214.9k | +72.5k | +4.07 | R4 improves |
+
+The most favorable verified efficiency case is ON seed 42: R3 reaches `71.2533%` full-HANS Three-way with `544,918` cumulative acquisition tokens; R4 consumes another `283,452` tokens yet falls to `68.6333%`. Thus R3 Pareto-dominates R4 for this seed under the current evaluator and also avoids one 32-example update. This is the clearest empirical motivation for the paper's stopping component: additional verified acquisition is not guaranteed to improve robustness and can move the model to a worse performance–cost point. The result is not universal: R4 improves Three-way accuracy for the other five seed/mode pairs, and under Direct Binary the same ON seed-42 R4 improves by `+0.60 pp`. Because full-HANS is sealed reporting data, this Pareto finding is retrospective evidence for designing a future validation-based stop rule—not authorization to select R3 post hoc.
+
+GPU wall-clock fields are proxies, not hardware-utilization integrals, and the seed-42 OFF run was affected by contention, so timing comparisons are descriptive rather than controlled cost measurements. The `+283,452` figure is the observed round-4 acquisition-token increment; it is not a full counterfactual pipeline saving because a run stopped at R3 could still require a final audit/evaluation.
 
 ![Resource and pilot compute](reports/experimental_result_figures/06_resource_cost_breakdown.svg)
 
-*Figure 6: Left, mean teacher tokens for ON/OFF. Right, measured cached-pilot wall-hours consumed by Fixed-32 versus the retrospective adaptive simulation.*
+*Figure 6: Left, retrospective full-HANS Three-way performance versus cumulative acquisition teacher tokens for R3 (open) and R4 (filled); ON seed 42 moves down and right. Right, measured cached-pilot wall-hours consumed by Fixed-32 versus adaptive simulation. Neither panel supplies an online stopping certificate.*
 
 Adaptive allocation uses 20 versus 160 pilots for seed 42 and 24 versus 192 for seed 43, saving 7.40 and 11.19 measured GPU wall-hours relative to Fixed-32. Every adaptive outcome is `uncertified_continue`; these are retrospective compute savings, not evidence of safe stopping.
 

@@ -1,24 +1,73 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="520" viewBox="0 0 1000 520">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600">
 <rect width="100%" height="100%" fill="white"/>
 <style>text{font-family:Inter,Arial,sans-serif;fill:#172033}.title{font-size:22px;font-weight:700}.axis{font-size:13px}.small{font-size:11px}.grid{stroke:#dbe3ed;stroke-width:1}.base{stroke:#475569;stroke-width:1.2}</style>
-<text x="500.0" y="31.0" class="title" text-anchor="middle">Resource diagnostics</text>
-<rect x="130" y="114.94309999999996" width="95" height="305.05690000000004" fill="#059669"/>
-<text x="177.0" y="440.0" class="axis" text-anchor="middle">ON</text>
-<text x="177.0" y="104.9" class="small" text-anchor="middle">1017k</text>
-<rect x="290" y="355.7271" width="95" height="64.27289999999999" fill="#dc2626"/>
-<text x="337.0" y="440.0" class="axis" text-anchor="middle">OFF</text>
-<text x="337.0" y="345.7" class="small" text-anchor="middle">214k</text>
-<text x="220.0" y="480.0" class="axis" text-anchor="middle">Mean teacher tokens</text>
-<rect x="580" y="221.30623712784976" width="48" height="198.69376287215024" fill="#64748b"/>
-<text x="604.0" y="211.3" class="small" text-anchor="middle">8.4h</text>
-<rect x="640" y="395.63380935183494" width="48" height="24.366190648165034" fill="#8b5cf6"/>
-<text x="664.0" y="385.6" class="small" text-anchor="middle">1.0h</text>
-<text x="640.0" y="440.0" class="axis" text-anchor="middle">Seed 42</text>
-<rect x="760" y="111.62118085969848" width="48" height="308.3788191403015" fill="#64748b"/>
-<text x="784.0" y="101.6" class="small" text-anchor="middle">13.1h</text>
-<rect x="820" y="375.34708004542784" width="48" height="44.65291995457215" fill="#8b5cf6"/>
-<text x="844.0" y="365.3" class="small" text-anchor="middle">1.9h</text>
-<text x="820.0" y="440.0" class="axis" text-anchor="middle">Seed 43</text>
-<text x="725.0" y="480.0" class="axis" text-anchor="middle">Pilot GPU wall-hours: fixed (gray) vs adaptive (purple)</text>
-<line x1="500" y1="65" x2="500" y2="475" class="grid"/>
+<text x="600.0" y="31.0" class="title" text-anchor="middle">Performance–resource diagnostics</text>
+<line x1="90.0" y1="75" x2="90.0" y2="500" class="grid"/>
+<text x="90.0" y="520.0" class="small" text-anchor="middle">100k</text>
+<line x1="206.0" y1="75" x2="206.0" y2="500" class="grid"/>
+<text x="206.0" y="520.0" class="small" text-anchor="middle">250k</text>
+<line x1="322.0" y1="75" x2="322.0" y2="500" class="grid"/>
+<text x="322.0" y="520.0" class="small" text-anchor="middle">400k</text>
+<line x1="438.0" y1="75" x2="438.0" y2="500" class="grid"/>
+<text x="438.0" y="520.0" class="small" text-anchor="middle">550k</text>
+<line x1="554.0" y1="75" x2="554.0" y2="500" class="grid"/>
+<text x="554.0" y="520.0" class="small" text-anchor="middle">700k</text>
+<line x1="670.0" y1="75" x2="670.0" y2="500" class="grid"/>
+<text x="670.0" y="520.0" class="small" text-anchor="middle">850k</text>
+<line x1="90" y1="500.0" x2="670" y2="500.0" class="grid"/>
+<text x="83.0" y="504.0" class="small" text-anchor="end">64%</text>
+<line x1="90" y1="369.2307692307692" x2="670" y2="369.2307692307692" class="grid"/>
+<text x="83.0" y="373.2" class="small" text-anchor="end">68%</text>
+<line x1="90" y1="238.46153846153848" x2="670" y2="238.46153846153848" class="grid"/>
+<text x="83.0" y="242.5" class="small" text-anchor="end">72%</text>
+<line x1="90" y1="107.6923076923077" x2="670" y2="107.6923076923077" class="grid"/>
+<text x="83.0" y="111.7" class="small" text-anchor="end">76%</text>
+<line x1="434.06991999999997" y1="262.871794871795" x2="653.2728" y2="348.5256410256408" stroke="#059669" stroke-width="4" opacity="1.0"/>
+<circle cx="434.06991999999997" cy="262.871794871795" r="8" fill="white" stroke="#059669" stroke-width="4"/>
+<circle cx="653.2728" cy="348.5256410256408" r="8" fill="#059669"/>
+<text x="441.1" y="255.9" class="small" text-anchor="start">ON42 R3</text>
+<text x="660.3" y="341.5" class="small" text-anchor="start">R4</text>
+<line x1="436.3172266666666" y1="327.6025641025643" x2="648.59568" y2="159.78205128205127" stroke="#059669" stroke-width="2" opacity="0.65"/>
+<circle cx="436.3172266666666" cy="327.6025641025643" r="6" fill="white" stroke="#059669" stroke-width="3"/>
+<circle cx="648.59568" cy="159.78205128205127" r="6" fill="#059669"/>
+<text x="443.3" y="320.6" class="small" text-anchor="start">ON43 R3</text>
+<text x="655.6" y="152.8" class="small" text-anchor="start">R4</text>
+<line x1="431.0268533333333" y1="351.7948717948718" x2="637.6329066666666" y2="238.89743589743597" stroke="#059669" stroke-width="2" opacity="0.65"/>
+<circle cx="431.0268533333333" cy="351.7948717948718" r="6" fill="white" stroke="#059669" stroke-width="3"/>
+<circle cx="637.6329066666666" cy="238.89743589743597" r="6" fill="#059669"/>
+<text x="438.0" y="344.8" class="small" text-anchor="start">ON44 R3</text>
+<text x="644.6" y="231.9" class="small" text-anchor="start">R4</text>
+<line x1="124.14730666666668" y1="477.551282051282" x2="178.59229333333332" y2="287.2820512820515" stroke="#dc2626" stroke-width="2" opacity="0.65"/>
+<circle cx="124.14730666666668" cy="477.551282051282" r="6" fill="white" stroke="#dc2626" stroke-width="3"/>
+<circle cx="178.59229333333332" cy="287.2820512820515" r="6" fill="#dc2626"/>
+<text x="131.1" y="470.6" class="small" text-anchor="start">OFF42 R3</text>
+<text x="185.6" y="280.3" class="small" text-anchor="start">R4</text>
+<line x1="121.82498666666666" y1="320.1923076923077" x2="177.5583466666667" y2="195.52564102564105" stroke="#dc2626" stroke-width="2" opacity="0.65"/>
+<circle cx="121.82498666666666" cy="320.1923076923077" r="6" fill="white" stroke="#dc2626" stroke-width="3"/>
+<circle cx="177.5583466666667" cy="195.52564102564105" r="6" fill="#dc2626"/>
+<text x="128.8" y="313.2" class="small" text-anchor="start">OFF43 R3</text>
+<text x="184.6" y="188.5" class="small" text-anchor="start">R4</text>
+<line x1="122.84501333333334" y1="332.3974358974359" x2="178.89312" y2="221.0256410256411" stroke="#dc2626" stroke-width="2" opacity="0.65"/>
+<circle cx="122.84501333333334" cy="332.3974358974359" r="6" fill="white" stroke="#dc2626" stroke-width="3"/>
+<circle cx="178.89312" cy="221.0256410256411" r="6" fill="#dc2626"/>
+<text x="129.8" y="325.4" class="small" text-anchor="start">OFF44 R3</text>
+<text x="185.9" y="214.0" class="small" text-anchor="start">R4</text>
+<rect x="105" y="86" width="315" height="42" rx="7" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+<text x="118.0" y="104.0" class="small" text-anchor="start">ON42 R3 vs R4: -283k acquisition tokens</text>
+<text x="118.0" y="121.0" class="small" text-anchor="start">and +2.62 pp HANS (Three-way; retrospective)</text>
+<text x="380.0" y="548.0" class="axis" text-anchor="middle">Cumulative acquisition teacher tokens</text>
+<text x="22.0" y="287.5" class="axis" text-anchor="middle" transform="rotate(-90 22 287.5)">Full-HANS Three-way accuracy (%)</text>
+<text x="380.0" y="58.0" class="axis" text-anchor="middle">R3 (open) → R4 (filled); retrospective only</text>
+<rect x="790" y="263.2431677758361" width="48" height="216.7568322241639" fill="#64748b"/>
+<text x="814.0" y="253.2" class="small" text-anchor="middle">8.4h</text>
+<rect x="850" y="453.4187011110927" width="48" height="26.581298888907313" fill="#8b5cf6"/>
+<text x="874.0" y="443.4" class="small" text-anchor="middle">1.0h</text>
+<text x="850.0" y="505.0" class="axis" text-anchor="middle">Seed 42</text>
+<rect x="970" y="143.5867427560347" width="48" height="336.4132572439653" fill="#64748b"/>
+<text x="994.0" y="133.6" class="small" text-anchor="middle">13.1h</text>
+<rect x="1030" y="431.28772368592126" width="48" height="48.71227631407871" fill="#8b5cf6"/>
+<text x="1054.0" y="421.3" class="small" text-anchor="middle">1.9h</text>
+<text x="1030.0" y="505.0" class="axis" text-anchor="middle">Seed 43</text>
+<text x="940.0" y="548.0" class="axis" text-anchor="middle">Pilot GPU wall-hours: fixed (gray) vs adaptive (purple)</text>
+<line x1="720" y1="60" x2="720" y2="550" class="grid"/>
 </svg>
